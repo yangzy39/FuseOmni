@@ -1,0 +1,1 @@
+python -m llamafactory.cli.train examples/train_lora/qwen3_omni_lora_sft.yaml
