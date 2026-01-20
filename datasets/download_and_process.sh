@@ -20,7 +20,7 @@ CALIBRATION_DIR="$OUTPUT_BASE/calibration"
 MSSWIFT_DIR="$OUTPUT_BASE/ms_swift"
 
 # Configuration
-HF_TOKEN="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"  # Your HuggingFace Token
+HF_TOKEN="xx"  # Your HuggingFace Token
 SAMPLES=100  # Adjust sample count as needed
 
 # 1. Environment Setup
