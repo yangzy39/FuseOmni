@@ -6,7 +6,7 @@
 set -e  # Exit on error
 
 # Configuration
-OUTPUT_DIR="./calibration_data"
+OUTPUT_DIR="/mnt/afs/00036/yzy/FuseOmni/datasets/data"
 SAMPLES=100
 
 echo "========================================================"
