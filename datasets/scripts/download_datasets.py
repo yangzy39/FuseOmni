@@ -32,6 +32,7 @@ from dataclasses import dataclass, field, asdict
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
+import huggingface_hub
 
 # 配置日志
 logging.basicConfig(
@@ -159,7 +160,7 @@ class CommonVoiceDownloader(DatasetDownloader):
     name = "common_voice"
     modality = "audio"
     description = "多语言众包语音识别数据集"
-    url = "https://huggingface.co/datasets/mozilla-foundation/common_voice_15_0"
+    url = "https://huggingface.co/datasets/fsicoli/common_voice_15_0"
     
     def download(self) -> bool:
         try:
@@ -167,7 +168,7 @@ class CommonVoiceDownloader(DatasetDownloader):
             logger.info("Loading Common Voice from HuggingFace...")
             # 加载英语子集
             self.dataset = load_dataset(
-                "mozilla-foundation/common_voice_15_0",
+                "fsicoli/common_voice_15_0",
                 "en",
                 split="train",
                 trust_remote_code=True
@@ -839,6 +840,12 @@ Examples:
     )
     
     parser.add_argument(
+        "--token", "-t",
+        type=str,
+        help="HuggingFace Access Token (用于下载受限数据集)"
+    )
+
+    parser.add_argument(
         "--verbose", "-v",
         action="store_true",
         help="显示详细日志"
@@ -849,6 +856,15 @@ Examples:
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
     
+    # HuggingFace 登录
+    if args.token:
+        try:
+            logger.info(f"Logging in to HuggingFace with provided token...")
+            huggingface_hub.login(token=args.token)
+            logger.info("Successfully logged in!")
+        except Exception as e:
+            logger.error(f"Failed to login: {e}")
+
     if args.list:
         list_datasets()
         return
