@@ -252,6 +252,369 @@ def split_jsonl_by_modality(
     return counts
 
 
+# =============================================================================
+# MS-SWIFT 格式转换函数
+# =============================================================================
+
+@dataclass
+class MSSwiftSample:
+    """MS-SWIFT 标准数据格式
+    
+    用于 Qwen3-Omni 等多模态模型的 SFT/GRPO 训练。
+    
+    格式说明:
+    - messages: 对话列表，包含 role (system/user/assistant) 和 content
+    - images: 图片路径列表（可选）
+    - videos: 视频路径列表（可选）
+    - audios: 音频路径列表（可选）
+    
+    特殊标记:
+    - <image>: 在 content 中标记图片位置
+    - <video>: 在 content 中标记视频位置
+    - <audio>: 在 content 中标记音频位置
+    """
+    messages: List[Dict[str, str]]
+    images: Optional[List[str]] = None
+    videos: Optional[List[str]] = None
+    audios: Optional[List[str]] = None
+    
+    def to_dict(self) -> Dict[str, Any]:
+        result = {"messages": self.messages}
+        if self.images:
+            result["images"] = self.images
+        if self.videos:
+            result["videos"] = self.videos
+        if self.audios:
+            result["audios"] = self.audios
+        return result
+
+
+def convert_unified_to_msswift(
+    input_path: Path,
+    output_path: Path,
+    task_type: str = "sft",
+    system_prompt: Optional[str] = None,
+    user_template: str = "{modality_tag}{text}",
+    assistant_template: Optional[str] = None
+) -> int:
+    """将统一格式转换为 MS-SWIFT 格式
+    
+    Args:
+        input_path: 输入的统一格式 JSONL 文件
+        output_path: 输出的 MS-SWIFT 格式 JSONL 文件
+        task_type: 任务类型，"sft" 或 "grpo"
+            - sft: 包含完整的 user-assistant 对话
+            - grpo: 仅包含 user 提示（用于强化学习）
+        system_prompt: 系统提示（可选）
+        user_template: 用户消息模板，支持 {modality_tag} 和 {text} 占位符
+        assistant_template: 助手回复模板（仅 sft 模式），None 表示使用原始 text
+        
+    Returns:
+        转换的样本数量
+    """
+    count = 0
+    
+    with open(input_path, 'r', encoding='utf-8') as in_f, \
+         open(output_path, 'w', encoding='utf-8') as out_f:
+        
+        for line in in_f:
+            data = json.loads(line)
+            
+            # 构建模态标记
+            modality_tags = []
+            images = []
+            videos = []
+            audios = []
+            
+            # 处理音频
+            if data.get("audio"):
+                audio_path = data["audio"]
+                if isinstance(audio_path, str):
+                    audios.append(audio_path)
+                    modality_tags.append("<audio>")
+                elif isinstance(audio_path, list):
+                    audios.extend(audio_path)
+                    modality_tags.extend(["<audio>"] * len(audio_path))
+            
+            # 处理视频
+            if data.get("video"):
+                video_path = data["video"]
+                if isinstance(video_path, str):
+                    videos.append(video_path)
+                    modality_tags.append("<video>")
+                elif isinstance(video_path, list):
+                    videos.extend(video_path)
+                    modality_tags.extend(["<video>"] * len(video_path))
+            
+            # 处理图片
+            if data.get("image"):
+                image_path = data["image"]
+                if isinstance(image_path, str):
+                    images.append(image_path)
+                    modality_tags.append("<image>")
+                elif isinstance(image_path, list):
+                    images.extend(image_path)
+                    modality_tags.extend(["<image>"] * len(image_path))
+            
+            # 构建消息
+            messages = []
+            
+            # 添加系统提示
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            
+            # 构建用户消息
+            text = data.get("text", "")
+            modality_tag = "".join(modality_tags)
+            user_content = user_template.format(
+                modality_tag=modality_tag,
+                text=text if text else "Describe the content."
+            )
+            messages.append({"role": "user", "content": user_content})
+            
+            # SFT 模式：添加助手回复
+            if task_type == "sft" and text:
+                if assistant_template:
+                    assistant_content = assistant_template.format(text=text)
+                else:
+                    assistant_content = text
+                messages.append({"role": "assistant", "content": assistant_content})
+            
+            # 构建样本
+            sample = MSSwiftSample(
+                messages=messages,
+                images=images if images else None,
+                videos=videos if videos else None,
+                audios=audios if audios else None
+            )
+            
+            out_f.write(json.dumps(sample.to_dict(), ensure_ascii=False) + '\n')
+            count += 1
+    
+    logger.info(f"Converted {count} samples to MS-SWIFT format: {output_path}")
+    return count
+
+
+def convert_qa_to_msswift(
+    input_path: Path,
+    output_path: Path,
+    question_key: str = "question",
+    answer_key: str = "answer",
+    image_key: Optional[str] = "image",
+    audio_key: Optional[str] = "audio",
+    video_key: Optional[str] = "video",
+    system_prompt: Optional[str] = None,
+    task_type: str = "sft"
+) -> int:
+    """将 QA 格式数据转换为 MS-SWIFT 格式
+    
+    适用于常见的 VQA、AudioQA 等问答数据集。
+    
+    Args:
+        input_path: 输入 JSONL 文件
+        output_path: 输出 MS-SWIFT 格式 JSONL 文件
+        question_key: 问题字段名
+        answer_key: 答案字段名
+        image_key: 图片字段名（可选）
+        audio_key: 音频字段名（可选）
+        video_key: 视频字段名（可选）
+        system_prompt: 系统提示（可选）
+        task_type: "sft" 或 "grpo"
+        
+    Returns:
+        转换的样本数量
+    """
+    count = 0
+    
+    with open(input_path, 'r', encoding='utf-8') as in_f, \
+         open(output_path, 'w', encoding='utf-8') as out_f:
+        
+        for line in in_f:
+            data = json.loads(line)
+            
+            messages = []
+            images = []
+            videos = []
+            audios = []
+            
+            # 系统提示
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            
+            # 构建用户问题
+            question = data.get(question_key, "")
+            modality_prefix = ""
+            
+            # 处理多模态输入
+            if image_key and data.get(image_key):
+                img = data[image_key]
+                if isinstance(img, str):
+                    images.append(img)
+                    modality_prefix += "<image>"
+                elif isinstance(img, list):
+                    images.extend(img)
+                    modality_prefix += "<image>" * len(img)
+            
+            if audio_key and data.get(audio_key):
+                aud = data[audio_key]
+                if isinstance(aud, str):
+                    audios.append(aud)
+                    modality_prefix += "<audio>"
+                elif isinstance(aud, list):
+                    audios.extend(aud)
+                    modality_prefix += "<audio>" * len(aud)
+            
+            if video_key and data.get(video_key):
+                vid = data[video_key]
+                if isinstance(vid, str):
+                    videos.append(vid)
+                    modality_prefix += "<video>"
+                elif isinstance(vid, list):
+                    videos.extend(vid)
+                    modality_prefix += "<video>" * len(vid)
+            
+            user_content = f"{modality_prefix}{question}" if modality_prefix else question
+            messages.append({"role": "user", "content": user_content})
+            
+            # SFT 模式添加答案
+            if task_type == "sft" and data.get(answer_key):
+                messages.append({"role": "assistant", "content": data[answer_key]})
+            
+            sample = MSSwiftSample(
+                messages=messages,
+                images=images if images else None,
+                videos=videos if videos else None,
+                audios=audios if audios else None
+            )
+            
+            out_f.write(json.dumps(sample.to_dict(), ensure_ascii=False) + '\n')
+            count += 1
+    
+    logger.info(f"Converted {count} QA samples to MS-SWIFT format: {output_path}")
+    return count
+
+
+def create_msswift_sample(
+    user_content: str,
+    assistant_content: Optional[str] = None,
+    system_prompt: Optional[str] = None,
+    images: Optional[List[str]] = None,
+    audios: Optional[List[str]] = None,
+    videos: Optional[List[str]] = None
+) -> Dict[str, Any]:
+    """创建单个 MS-SWIFT 格式样本
+    
+    便捷函数，用于在代码中直接创建样本。
+    
+    Example:
+        >>> sample = create_msswift_sample(
+        ...     user_content="<audio>What did the speaker say?",
+        ...     assistant_content="The speaker said hello.",
+        ...     audios=["/path/to/audio.wav"]
+        ... )
+        >>> print(json.dumps(sample, ensure_ascii=False))
+    """
+    messages = []
+    
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    
+    messages.append({"role": "user", "content": user_content})
+    
+    if assistant_content:
+        messages.append({"role": "assistant", "content": assistant_content})
+    
+    result = {"messages": messages}
+    
+    if images:
+        result["images"] = images
+    if audios:
+        result["audios"] = audios
+    if videos:
+        result["videos"] = videos
+    
+    return result
+
+
+def validate_msswift_format(jsonl_path: Path) -> Dict[str, Any]:
+    """验证 MS-SWIFT 格式的 JSONL 文件
+    
+    Returns:
+        包含验证结果的字典
+    """
+    stats = {
+        "total": 0,
+        "valid": 0,
+        "with_images": 0,
+        "with_audios": 0,
+        "with_videos": 0,
+        "with_system": 0,
+        "sft_samples": 0,  # 有 assistant 回复的
+        "grpo_samples": 0,  # 只有 user 提问的
+        "errors": []
+    }
+    
+    with open(jsonl_path, 'r', encoding='utf-8') as f:
+        for idx, line in enumerate(f):
+            stats["total"] += 1
+            try:
+                data = json.loads(line)
+                
+                # 检查必需字段
+                if "messages" not in data:
+                    stats["errors"].append(f"Line {idx + 1}: Missing 'messages' field")
+                    continue
+                
+                messages = data["messages"]
+                if not isinstance(messages, list) or len(messages) == 0:
+                    stats["errors"].append(f"Line {idx + 1}: 'messages' must be a non-empty list")
+                    continue
+                
+                # 检查消息格式
+                has_user = False
+                has_assistant = False
+                has_system = False
+                
+                for msg in messages:
+                    if not isinstance(msg, dict) or "role" not in msg or "content" not in msg:
+                        stats["errors"].append(f"Line {idx + 1}: Invalid message format")
+                        continue
+                    
+                    role = msg["role"]
+                    if role == "user":
+                        has_user = True
+                    elif role == "assistant":
+                        has_assistant = True
+                    elif role == "system":
+                        has_system = True
+                
+                if not has_user and not has_assistant:
+                    stats["errors"].append(f"Line {idx + 1}: No user or assistant message found")
+                    continue
+                
+                stats["valid"] += 1
+                
+                if has_system:
+                    stats["with_system"] += 1
+                if has_assistant:
+                    stats["sft_samples"] += 1
+                else:
+                    stats["grpo_samples"] += 1
+                
+                # 检查多模态字段
+                if data.get("images"):
+                    stats["with_images"] += 1
+                if data.get("audios"):
+                    stats["with_audios"] += 1
+                if data.get("videos"):
+                    stats["with_videos"] += 1
+                    
+            except json.JSONDecodeError as e:
+                stats["errors"].append(f"Line {idx + 1}: JSON decode error - {str(e)}")
+    
+    return stats
+
+
 def validate_jsonl(jsonl_path: Path) -> Dict[str, Any]:
     """验证JSONL文件格式"""
     
@@ -337,6 +700,35 @@ def main():
     validate_parser = subparsers.add_parser("validate", help="Validate JSONL file")
     validate_parser.add_argument("input", type=Path, help="Input JSONL file")
     
+    # MS-SWIFT 格式转换
+    msswift_parser = subparsers.add_parser("msswift", help="Convert to MS-SWIFT format")
+    msswift_parser.add_argument("input", type=Path, help="Input JSONL file (unified format)")
+    msswift_parser.add_argument("output", type=Path, help="Output MS-SWIFT JSONL file")
+    msswift_parser.add_argument("--task", choices=["sft", "grpo"], default="sft",
+                                help="Task type: sft (with responses) or grpo (prompts only)")
+    msswift_parser.add_argument("--system", type=str, default=None,
+                                help="System prompt to add")
+    msswift_parser.add_argument("--user-template", type=str, 
+                                default="{modality_tag}{text}",
+                                help="User message template")
+    
+    # QA 格式转换
+    qa_parser = subparsers.add_parser("qa-msswift", help="Convert QA format to MS-SWIFT")
+    qa_parser.add_argument("input", type=Path, help="Input QA JSONL file")
+    qa_parser.add_argument("output", type=Path, help="Output MS-SWIFT JSONL file")
+    qa_parser.add_argument("--question-key", default="question", help="Question field name")
+    qa_parser.add_argument("--answer-key", default="answer", help="Answer field name")
+    qa_parser.add_argument("--image-key", default="image", help="Image field name")
+    qa_parser.add_argument("--audio-key", default="audio", help="Audio field name")
+    qa_parser.add_argument("--video-key", default="video", help="Video field name")
+    qa_parser.add_argument("--system", type=str, default=None, help="System prompt")
+    qa_parser.add_argument("--task", choices=["sft", "grpo"], default="sft", help="Task type")
+    
+    # 验证 MS-SWIFT 格式
+    validate_msswift_parser = subparsers.add_parser("validate-msswift", 
+                                                     help="Validate MS-SWIFT format")
+    validate_msswift_parser.add_argument("input", type=Path, help="Input MS-SWIFT JSONL file")
+    
     args = parser.parse_args()
     
     if args.command == "csv":
@@ -374,6 +766,39 @@ def main():
         if stats['errors']:
             print(f"  Errors: {len(stats['errors'])}")
             for err in stats['errors'][:5]:
+                print(f"    - {err}")
+    elif args.command == "msswift":
+        convert_unified_to_msswift(
+            args.input, args.output,
+            task_type=args.task,
+            system_prompt=args.system,
+            user_template=args.user_template
+        )
+    elif args.command == "qa-msswift":
+        convert_qa_to_msswift(
+            args.input, args.output,
+            question_key=args.question_key,
+            answer_key=args.answer_key,
+            image_key=args.image_key,
+            audio_key=args.audio_key,
+            video_key=args.video_key,
+            system_prompt=args.system,
+            task_type=args.task
+        )
+    elif args.command == "validate-msswift":
+        stats = validate_msswift_format(args.input)
+        print("\nMS-SWIFT Format Validation:")
+        print(f"  Total samples: {stats['total']}")
+        print(f"  Valid samples: {stats['valid']}")
+        print(f"  SFT samples (with response): {stats['sft_samples']}")
+        print(f"  GRPO samples (prompts only): {stats['grpo_samples']}")
+        print(f"  With system prompt: {stats['with_system']}")
+        print(f"  With images: {stats['with_images']}")
+        print(f"  With audios: {stats['with_audios']}")
+        print(f"  With videos: {stats['with_videos']}")
+        if stats['errors']:
+            print(f"  Errors: {len(stats['errors'])}")
+            for err in stats['errors'][:10]:
                 print(f"    - {err}")
     else:
         parser.print_help()
