@@ -218,12 +218,22 @@ def start_gpu_keepers():
 
 
 def stop_gpu_keepers():
-    """Stop all keep-alive workers"""
+    """Stop all keep-alive workers and clear state"""
+    global gpu_busy_flags, gpu_processes
+    
     for gpu_id, event in gpu_busy_flags.items():
         event.set()
     for gpu_id, p in gpu_processes.items():
         p.terminate()
         p.join(timeout=5)
+        # Force kill if still alive
+        if p.is_alive():
+            p.kill()
+            p.join(timeout=2)
+    
+    # Clear state so start_gpu_keepers can restart fresh
+    gpu_busy_flags.clear()
+    gpu_processes.clear()
 
 
 # ==================== Task Queue ====================
@@ -289,6 +299,12 @@ def execute_task(task_name, task_path):
     print(f"[TASK] Starting: {task_name}")
     print(f"[TASK] Log: {log_file}")
     
+    # CRITICAL: Stop GPU keepers to release memory for the task
+    # The keep-alive workers hold ~60% of GPU memory with large matrices.
+    # Training tasks will OOM if we don't release this memory first.
+    print(f"[TASK] Stopping GPU keepers to release memory...")
+    stop_gpu_keepers()
+    
     try:
         # Determine executor
         if task_name.endswith('.py'):
@@ -346,6 +362,10 @@ def execute_task(task_name, task_path):
     
     # Clear current task
     write_control({"status": "running", "current_task": None})
+    
+    # Restart GPU keepers after task completes
+    print(f"[TASK] Restarting GPU keepers...")
+    start_gpu_keepers()
 
 
 def main_loop():

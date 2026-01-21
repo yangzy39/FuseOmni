@@ -4,6 +4,10 @@
 
 set -e
 
+CONDA_PATH="/mnt/afs/00036/software/conda/bin/activate"
+CONDA_ENV="fuseomni"
+source ${CONDA_PATH} ${CONDA_ENV}
+
 # ========================= Configuration =========================
 MODEL_PATH="/mnt/afs/00036/yzy/FuseOmni/models"
 MODEL_ID="Qwen3-Omni-30B-A3B-Instruct"
