@@ -21,7 +21,8 @@
 set -e
 
 # ========================= Configuration =========================
-MODEL_ID="Qwen/Qwen3-Omni-30B-A3B-Instruct"
+MODEL_PATH="/mnt/afs/00036/yzy/FuseOmni/models"
+MODEL_ID="Qwen3-Omni-30B-A3B-Instruct"
 DATASET="/path/to/your/sft_data.jsonl"
 OUTPUT_DIR="./output/qwen3_omni_sft_full"
 
@@ -40,7 +41,7 @@ export PYTORCH_CUDA_ALLOC_CONF='expandable_segments:True'
 CUDA_VISIBLE_DEVICES=${CUDA_DEVICES} \
 NPROC_PER_NODE=${NPROC_PER_NODE} \
 swift sft \
-    --model ${MODEL_ID} \
+    --model ${MODEL_PATH}/${MODEL_ID} \
     --dataset "${DATASET}" \
     --tuner_type full \
     --torch_dtype bfloat16 \

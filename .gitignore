@@ -10,6 +10,7 @@ __pycache__/
 .Python
 vllm-omni/
 survey/
+LLaMA-Factory/
 datasets/data
 datasets/*.sh
 models/

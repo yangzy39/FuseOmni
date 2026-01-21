@@ -23,12 +23,11 @@ set -e
 # Configuration
 # =============================================================================
 
-SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-DEFAULT_OUTPUT_DIR="$SCRIPT_DIR/data"
+DEFAULT_OUTPUT_DIR="/mnt/afs/00036/yzy/FuseOmni/datasets/data"
 
 # HuggingFace settings
 HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
-HF_TOKEN="${HF_TOKEN:-}"
+HF_TOKEN="${HF_TOKEN:-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}"
 
 # Dataset registry: name|hf_id|requires_auth|description
 declare -A DATASETS=(
