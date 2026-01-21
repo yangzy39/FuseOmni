@@ -2,29 +2,40 @@
 
 在 SCO ACP 集群上保持 GPU 资源占用，防止因空闲被系统回收，同时支持远程提交和管理训练任务。
 
+## 核心特性
+
+- **动态 GPU 保活**：根据显存大小自动计算矩阵尺寸，保持 GPU 利用率 >70%
+- **多实例隔离**：每个 JOB_ID 拥有独立的任务队列，互不干扰
+- **远程任务管理**：无需登录节点即可提交、查看、停止任务
+
 ## 系统架构
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                    本地/任意机器                              │
+│  export JOB_ID=train-exp1                                   │
 │  source client.sh                                           │
 │  gpu_submit train.sh   gpu_status   gpu_stop   gpu_logs     │
 └─────────────────────────┬───────────────────────────────────┘
                           │ (通过共享存储 /mnt/afs)
 ┌─────────────────────────▼───────────────────────────────────┐
-│              /mnt/afs/00036/yzy/gpu_queue/                  │
-│  ├── pending/    ← 待执行脚本                                │
-│  ├── running/    ← 正在执行                                  │
-│  ├── done/       ← 已完成                                    │
-│  ├── failed/     ← 失败                                      │
-│  ├── logs/       ← 日志                                      │
-│  └── control.json ← 控制信号 (stop/shutdown)                 │
+│              /mnt/afs/.../gpu_queue/                        │
+│  ├── train-exp1/          ← JOB_ID=train-exp1 的队列        │
+│  │   ├── pending/                                           │
+│  │   ├── running/                                           │
+│  │   ├── done/                                              │
+│  │   ├── failed/                                            │
+│  │   ├── logs/                                              │
+│  │   └── control.json                                       │
+│  ├── train-exp2/          ← JOB_ID=train-exp2 的队列        │
+│  └── ...                                                    │
 └─────────────────────────▲───────────────────────────────────┘
                           │
 ┌─────────────────────────┴───────────────────────────────────┐
 │                 SCO ACP 计算节点                              │
-│  perpetual_motion.py                                        │
-│  ├── GPU Keep-Alive: 矩阵运算保持 GPU 利用率 > 30%           │
+│  perpetual_motion.py --job-id train-exp1                    │
+│  ├── 动态矩阵大小: 根据 GPU 显存自动计算                      │
+│  ├── GPU Keep-Alive: 保持利用率 70-85%                       │
 │  ├── Queue Monitor: 监控 pending/ 执行新任务                 │
 │  └── Task Executor: 执行脚本并输出日志                       │
 └─────────────────────────────────────────────────────────────┘
@@ -42,27 +53,24 @@
 
 ### 1. 配置路径
 
-编辑 `submit.sh` 和 `client.sh`，修改以下路径：
+编辑 `submit.sh`，修改以下路径：
 
 ```bash
-# submit.sh
-CODE_DIR="/mnt/afs/00036/yzy/FuseOmni/ydj"  # 本项目在共享存储的路径
-QUEUE_BASE="/mnt/afs/00036/yzy/gpu_queue"    # 任务队列目录
+CODE_DIR="/mnt/afs/00036/yzy/FuseOmni/ydj"   # 本项目路径
+QUEUE_ROOT="/mnt/afs/00036/yzy/gpu_queue"     # 队列根目录
 CONDA_PATH="/mnt/afs/00036/software/conda/bin/activate"
 CONDA_ENV="swift"
-
-# client.sh
-export QUEUE_BASE="/mnt/afs/00036/yzy/gpu_queue"
 ```
 
 ### 2. 提交永动机
 
 ```bash
-# 默认 2 GPU
-bash submit.sh
+# 语法: ./submit.sh <JOB_ID> [GPU数量] [节点数量]
 
-# 或指定 GPU 数量
-bash submit.sh 4
+# 示例
+./submit.sh train-exp1           # 2 GPU, 1 节点, 队列: gpu_queue/train-exp1/
+./submit.sh train-exp2 4         # 4 GPU, 1 节点
+./submit.sh train-exp3 8 2       # 8 GPU, 2 节点
 ```
 
 ### 3. 使用客户端
@@ -70,14 +78,30 @@ bash submit.sh 4
 在任意可以访问共享存储的机器上：
 
 ```bash
+# 指定要操作的永动机实例
+export JOB_ID=train-exp1
+
 # 加载客户端工具
-source /mnt/afs/00036/yzy/FuseOmni/ydj/client.sh
+source /mnt/afs/.../FuseOmni/ydj/client.sh
 
 # 查看帮助
 gpu_help
 ```
 
 ## 客户端命令
+
+### 实例管理
+
+```bash
+# 查看当前实例
+gpu_use
+
+# 切换到其他实例
+gpu_use train-exp2
+
+# 列出所有实例
+gpu_list
+```
 
 ### 提交任务
 
@@ -113,13 +137,56 @@ gpu_tail train
 
 ```bash
 # 停止特定任务
-gpu_stop 20250121_train.sh
+gpu_stop train.sh
 
 # 清空所有待执行任务并停止当前任务
 gpu_stop all
 
 # 关闭永动机
 gpu_shutdown
+```
+
+## 动态矩阵大小
+
+永动机会根据 GPU 显存自动计算最优矩阵大小：
+
+```python
+# 目标: 使用 60% 显存用于矩阵
+# 矩阵乘法 C = A @ B 需要 3 个 N×N 矩阵
+# 内存 = 3 * N² * 2 bytes (float16)
+# N = sqrt(显存 * 0.6 / 6)
+
+# 示例:
+# 24GB GPU → 矩阵约 14336×14336
+# 48GB GPU → 矩阵约 20480×20480
+# 80GB GPU → 矩阵约 26624×26624
+```
+
+利用率控制：
+- `< 50%`: 加速矩阵运算，提升利用率
+- `50-70%`: 正常运算
+- `70-85%`: 目标范围
+- `> 85%`: 减慢运算，为真实任务让出资源
+
+## 多实例使用场景
+
+```bash
+# 实验 1: 小规模测试
+./submit.sh test-small 2
+
+# 实验 2: 大规模训练  
+./submit.sh train-large 8
+
+# 实验 3: 推理服务
+./submit.sh inference 4
+
+# 客户端切换
+export JOB_ID=test-small
+source client.sh
+gpu_submit test_script.sh
+
+gpu_use train-large  # 切换到另一个实例
+gpu_submit train_script.sh
 ```
 
 ## 任务脚本示例
@@ -143,43 +210,6 @@ CUDA_VISIBLE_DEVICES=0,1 swift sft \
     --output_dir /mnt/afs/00036/yzy/checkpoints/test
 ```
 
-### Python 脚本 `train.py`
-
-```python
-#!/usr/bin/env python3
-import torch
-# 你的训练代码...
-```
-
-## 工作原理
-
-### GPU 保活
-
-永动机持续运行矩阵乘法保持 GPU 利用率在 30-50%：
-
-```python
-# 当 GPU 利用率 < 30% 时
-c = torch.mm(a, b)  # 执行矩阵乘法提升利用率
-
-# 当 GPU 利用率 > 50% 时（有真实任务）
-time.sleep(interval)  # 降低频率让出资源
-```
-
-### 任务队列
-
-1. 用户通过 `gpu_submit` 将脚本复制到 `pending/` 目录
-2. 永动机监控 `pending/` 目录，按时间顺序执行任务
-3. 执行时脚本移动到 `running/`，日志写入 `logs/`
-4. 完成后移动到 `done/` 或 `failed/`
-
-### 远程控制
-
-通过共享存储的 `control.json` 文件传递控制信号：
-
-```json
-{"status": "running", "current_task": "train.sh", "stop_task": "train.sh"}
-```
-
 ## SCO ACP 管理命令
 
 ```bash
@@ -189,8 +219,8 @@ sco acp jobs list --workspace-name=share-space
 # 实时监控（过滤用户名）
 watch -n 0.5 "sco acp jobs list --workspace-name=share-space --page-size 500 | awk 'NR<=3 || /yzy/'"
 
-# 删除作业
-sco acp jobs delete --workspace-name=share-space pt-xxxxxxxx
+# 删除作业 (作业名为 ydj-<JOB_ID>)
+sco acp jobs delete --workspace-name=share-space ydj-train-exp1
 
 # 登录节点（调试用）
 Jobid=pt-xxxxxxxx
@@ -206,15 +236,17 @@ sco acp jobs exec --workspace-name=share-space \
 编辑 `perpetual_motion.py`：
 
 ```python
-GPU_UTIL_THRESHOLD = 30  # 低于此值开始保活
-GPU_UTIL_TARGET = 50     # 目标利用率
+GPU_UTIL_THRESHOLD = 50  # 低于此值开始保活
+GPU_UTIL_TARGET = 70     # 目标利用率
+GPU_UTIL_HIGH = 85       # 高于此值减速
+MEMORY_USAGE_TARGET = 0.6  # 显存使用比例
 ```
 
 ### Q: 任务执行失败怎么查看原因？
 
 ```bash
 # 查看失败任务
-ls /mnt/afs/00036/yzy/gpu_queue/failed/
+ls /mnt/afs/.../gpu_queue/<JOB_ID>/failed/
 
 # 查看对应日志
 gpu_logs <task_name>
@@ -235,7 +267,17 @@ source /mnt/afs/00036/software/conda/bin/activate your_env
 重新提交即可，队列目录中的任务会保留：
 
 ```bash
-bash submit.sh
+./submit.sh <JOB_ID>  # 使用相同的 JOB_ID
+```
+
+### Q: 如何同时运行多个永动机？
+
+每个永动机使用不同的 JOB_ID，它们的队列相互独立：
+
+```bash
+./submit.sh exp1 4   # 第一个实例
+./submit.sh exp2 4   # 第二个实例
+./submit.sh exp3 8   # 第三个实例
 ```
 
 ## License
