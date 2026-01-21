@@ -210,7 +210,7 @@ gpu_list() {
 gpu_stop() {
     if [ -z "$1" ]; then
         echo "Usage: gpu_stop <task_name|all>"
-        echo "  Stop a running task or 'all' to clear pending queue"
+        echo "  Stop a running task or 'all' to clear pending queue and kill Python processes"
         echo ""
         echo "Current JOB_ID: $JOB_ID"
         return 1
@@ -223,12 +223,17 @@ gpu_stop() {
         rm -f "${PENDING_DIR}"/*
         echo "Cleared all pending tasks for: $JOB_ID"
         
-        # Signal stop to running task
+        # Signal stop to running task and kill all Python processes
         if [ -f "$CONTROL_FILE" ]; then
             local current=$(python3 -c "import json; print(json.load(open('$CONTROL_FILE')).get('current_task', ''))" 2>/dev/null)
             if [ -n "$current" ] && [ "$current" != "None" ]; then
-                echo "{\"status\": \"running\", \"current_task\": \"$current\", \"stop_task\": \"$current\", \"job_id\": \"$JOB_ID\"}" > "$CONTROL_FILE"
+                echo "{\"status\": \"running\", \"current_task\": \"$current\", \"stop_task\": \"$current\", \"kill_python\": true, \"job_id\": \"$JOB_ID\"}" > "$CONTROL_FILE"
                 echo "Stop signal sent to: $current"
+                echo "Kill Python processes signal sent"
+            else
+                # No current task, just send kill_python signal
+                echo "{\"status\": \"running\", \"current_task\": null, \"kill_python\": true, \"job_id\": \"$JOB_ID\"}" > "$CONTROL_FILE"
+                echo "Kill Python processes signal sent"
             fi
         fi
     else
@@ -248,8 +253,9 @@ gpu_stop() {
             if [ -f "$CONTROL_FILE" ]; then
                 local current=$(python3 -c "import json; print(json.load(open('$CONTROL_FILE')).get('current_task', ''))" 2>/dev/null)
                 if [[ "$current" == *"$target"* ]]; then
-                    echo "{\"status\": \"running\", \"current_task\": \"$current\", \"stop_task\": \"$current\", \"job_id\": \"$JOB_ID\"}" > "$CONTROL_FILE"
+                    echo "{\"status\": \"running\", \"current_task\": \"$current\", \"stop_task\": \"$current\", \"kill_python\": true, \"job_id\": \"$JOB_ID\"}" > "$CONTROL_FILE"
                     echo "Stop signal sent to running task: $current"
+                    echo "Kill Python processes signal sent"
                     return 0
                 fi
             fi

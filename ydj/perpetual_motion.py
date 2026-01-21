@@ -25,9 +25,12 @@ import subprocess
 import threading
 import multiprocessing
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 import argparse
+
+# Auto-shutdown settings
+AUTO_SHUTDOWN_HOURS = 24  # Shutdown after this many hours from start
 
 # ==================== Configuration ====================
 # JOB_ID for queue isolation (each perpetual motion instance has its own queue)
@@ -236,6 +239,94 @@ def stop_gpu_keepers():
     gpu_processes.clear()
 
 
+# ==================== Kill Other Python Processes ====================
+def kill_other_python_processes():
+    """
+    Kill all Python processes except perpetual_motion.py and its child processes.
+    This is used when gpu_stop is called to clean up any orphaned training processes.
+    """
+    import os
+    
+    my_pid = os.getpid()
+    my_children = set()
+    
+    # Collect our child process PIDs
+    for gpu_id, p in gpu_processes.items():
+        my_children.add(p.pid)
+    
+    print(f"[INFO] Killing other Python processes (my PID: {my_pid}, children: {my_children})")
+    
+    try:
+        # Use ps to find all python processes
+        cmd = "ps aux | grep -E 'python|Python' | grep -v grep"
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+        
+        killed_count = 0
+        for line in result.stdout.strip().split('\n'):
+            if not line:
+                continue
+            
+            parts = line.split()
+            if len(parts) < 2:
+                continue
+            
+            try:
+                pid = int(parts[1])
+            except ValueError:
+                continue
+            
+            # Skip ourselves and our children
+            if pid == my_pid or pid in my_children:
+                continue
+            
+            # Skip if it's perpetual_motion.py
+            if 'perpetual_motion.py' in line or 'perpetual_motion' in line:
+                continue
+            
+            # Kill the process
+            try:
+                os.kill(pid, signal.SIGTERM)
+                print(f"[INFO] Sent SIGTERM to PID {pid}: {' '.join(parts[10:])[:60]}")
+                killed_count += 1
+            except ProcessLookupError:
+                pass  # Process already dead
+            except PermissionError:
+                print(f"[WARN] No permission to kill PID {pid}")
+        
+        # Wait a bit and then SIGKILL any remaining
+        if killed_count > 0:
+            time.sleep(3)
+            
+            # Force kill any remaining
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+            for line in result.stdout.strip().split('\n'):
+                if not line:
+                    continue
+                parts = line.split()
+                if len(parts) < 2:
+                    continue
+                try:
+                    pid = int(parts[1])
+                except ValueError:
+                    continue
+                
+                if pid == my_pid or pid in my_children:
+                    continue
+                if 'perpetual_motion.py' in line or 'perpetual_motion' in line:
+                    continue
+                
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                    print(f"[INFO] Sent SIGKILL to PID {pid}")
+                except (ProcessLookupError, PermissionError):
+                    pass
+        
+        print(f"[INFO] Killed {killed_count} Python processes")
+        
+    except Exception as e:
+        print(f"[WARN] Error killing Python processes: {e}")
+
+
 # ==================== Task Queue ====================
 def init_queue():
     """Initialize queue directories"""
@@ -370,6 +461,9 @@ def execute_task(task_name, task_path):
 
 def main_loop():
     """Main queue monitoring loop"""
+    start_time = datetime.now()
+    shutdown_time = start_time + timedelta(hours=AUTO_SHUTDOWN_HOURS)
+    
     print("=" * 60)
     print("GPU Perpetual Motion Machine (永动机)")
     print("=" * 60)
@@ -377,6 +471,8 @@ def main_loop():
     print(f"[INFO] Queue directory: {QUEUE_BASE}")
     print(f"[INFO] Submit tasks to: {PENDING_DIR}")
     print(f"[INFO] Target GPU utilization: {GPU_UTIL_TARGET}%-{GPU_UTIL_HIGH}%")
+    print(f"[INFO] Started at: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"[INFO] Auto-shutdown at: {shutdown_time.strftime('%Y-%m-%d %H:%M:%S')} ({AUTO_SHUTDOWN_HOURS}h)")
     print("=" * 60)
     
     init_queue()
@@ -384,11 +480,24 @@ def main_loop():
     
     try:
         while True:
-            # Check control file for shutdown
+            # Check for auto-shutdown (24 hours from start)
+            if datetime.now() >= shutdown_time:
+                print(f"[INFO] Auto-shutdown triggered after {AUTO_SHUTDOWN_HOURS} hours")
+                break
+            
+            # Check control file for shutdown or kill_python signal
             control = read_control()
             if control.get("status") == "shutdown":
                 print("[INFO] Shutdown requested")
                 break
+            
+            # Check for kill_python signal
+            if control.get("kill_python"):
+                print("[INFO] Kill Python processes requested")
+                kill_other_python_processes()
+                # Clear the signal
+                control["kill_python"] = False
+                write_control(control)
             
             # Check for pending tasks
             tasks = get_pending_tasks()

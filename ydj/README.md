@@ -7,6 +7,8 @@
 - **动态 GPU 保活**：根据显存大小自动计算矩阵尺寸，保持 GPU 利用率 >70%
 - **多实例隔离**：每个 JOB_ID 拥有独立的任务队列，互不干扰
 - **远程任务管理**：无需登录节点即可提交、查看、停止任务
+- **24小时自动关闭**：从启动开始计时，24小时后自动退出，防止资源浪费
+- **进程清理**：gpu_stop 时自动杀掉除永动机外的所有 Python 进程
 
 ## 系统架构
 
@@ -139,12 +141,14 @@ gpu_tail train
 # 停止特定任务
 gpu_stop train.sh
 
-# 清空所有待执行任务并停止当前任务
+# 清空所有待执行任务、停止当前任务、并杀掉所有其他 Python 进程
 gpu_stop all
 
 # 关闭永动机
 gpu_shutdown
 ```
+
+> **注意**: `gpu_stop` 会自动杀掉节点上除永动机以外的所有 Python 进程，确保资源完全释放。
 
 ## 动态矩阵大小
 
@@ -240,7 +244,30 @@ GPU_UTIL_THRESHOLD = 50  # 低于此值开始保活
 GPU_UTIL_TARGET = 70     # 目标利用率
 GPU_UTIL_HIGH = 85       # 高于此值减速
 MEMORY_USAGE_TARGET = 0.6  # 显存使用比例
+AUTO_SHUTDOWN_HOURS = 24   # 自动关闭时间（小时）
 ```
+
+### Q: 如何修改自动关闭时间？
+
+编辑 `perpetual_motion.py` 中的 `AUTO_SHUTDOWN_HOURS`：
+
+```python
+AUTO_SHUTDOWN_HOURS = 24  # 默认24小时，改为 48 则48小时后关闭
+```
+
+永动机启动时会打印自动关闭时间：
+```
+[INFO] Started at: 2025-01-21 16:00:00
+[INFO] Auto-shutdown at: 2025-01-22 16:00:00 (24h)
+```
+
+### Q: gpu_stop 会杀掉哪些进程？
+
+`gpu_stop all` 或 `gpu_stop <task>` 会：
+1. 停止当前正在运行的任务
+2. 杀掉节点上所有 Python 进程（**除永动机自身及其子进程外**）
+
+这确保了训练进程完全退出，释放 GPU 显存。
 
 ### Q: 任务执行失败怎么查看原因？
 
