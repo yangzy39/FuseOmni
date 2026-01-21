@@ -6,279 +6,199 @@
 
 ```
 datasets/
-├── README.md                 # 本文档
-├── DATASETS_CATALOG.md       # 完整数据集目录表格
-├── download_datasets.py      # 主数据集下载脚本
-├── extended_datasets.py      # 扩展数据集支持
-├── convert_utils.py          # 格式转换工具（支持 MS-SWIFT 格式）
-└── quickstart.py             # 快速开始脚本
+├── README.md                     # 本文档
+├── DATASETS_CATALOG.md           # 完整数据集目录表格
+└── scripts/
+    ├── download.sh               # huggingface-cli 批量下载脚本
+    ├── process.py                # 数据集处理主入口
+    ├── convert_utils.py          # 格式转换工具
+    ├── search_hf_datasets.py     # HuggingFace 数据集搜索工具
+    └── processors/               # 数据集处理器
+        ├── __init__.py           # 处理器注册表
+        ├── base.py               # 基类定义
+        ├── librispeech.py        # LibriSpeech 处理器
+        ├── common_voice.py       # Common Voice 处理器
+        ├── gigaspeech.py         # GigaSpeech 处理器
+        ├── wavcaps.py            # WavCaps 处理器
+        └── aishell.py            # AISHELL-1 处理器
 ```
 
 ## 🚀 快速开始
 
-### 1. 安装依赖
+### 1. 环境配置
 
 ```bash
-pip install datasets soundfile tqdm pandas
+# 设置 HuggingFace 镜像（中国用户推荐）
+export HF_ENDPOINT=https://hf-mirror.com
+
+# 设置 HuggingFace Token（部分数据集需要认证）
+export HF_TOKEN="your_token_here"
+
+# 安装依赖
+pip install datasets soundfile tqdm pandas huggingface_hub pyarrow
 ```
 
-### 2. 查看支持的数据集
+### 2. 新工作流：下载 → 处理
+
+**推荐使用新的两步工作流：**
 
 ```bash
-python download_datasets.py --list
+# 步骤 1: 使用 huggingface-cli 下载数据集（保留原始结构）
+./scripts/download.sh --datasets librispeech aishell1
+
+# 步骤 2: 使用专用处理器转换为 MS-SWIFT 格式
+python scripts/process.py --input ./data --output ./output --merge
 ```
 
-### 3. 下载推荐数据集
+### 3. 查看支持的数据集
 
 ```bash
-python quickstart.py --output ./calibration_data --samples 100
+# 查看可下载的数据集
+./scripts/download.sh --list
+
+# 查看可处理的数据集
+python scripts/process.py --list
 ```
 
-### 4. 下载特定数据集
+### 4. 处理单个数据集
 
 ```bash
 # 下载单个数据集
-python download_datasets.py --dataset librispeech --output ./data --samples 100
+./scripts/download.sh --datasets librispeech --output ./data
 
-# 下载多个数据集
-python download_datasets.py --dataset librispeech gigaspeech common_voice --output ./data
-
-# 按模态下载
-python download_datasets.py --modality audio --output ./data
-python download_datasets.py --modality video --output ./data
-python download_datasets.py --modality mixed --output ./data
+# 处理单个数据集
+python scripts/process.py \
+    --input ./data/librispeech \
+    --dataset librispeech \
+    --output ./output \
+    --max-samples 1000
 ```
 
-## 📊 支持的数据集
-
-### Audio-only (S1) - 用于计算纯音频专家亲和度
-
-| 数据集 | 规模 | 说明 |
-|--------|------|------|
-| LibriSpeech | 960h | 英语有声读物 |
-| Common Voice | 19K+h | 多语言众包 |
-| GigaSpeech | 10K+h | 多领域英语 |
-| VoxPopuli | 400K+h | 欧洲议会多语言 |
-| WenetSpeech | 10K+h | 中文多领域 |
-| WavCaps | 400K clips | 音频描述 |
-| AISHELL-1 | 170h | 中文普通话 |
-| CoVoST2 | 2.9K h | 语音翻译 |
-
-### Video-only (S2) - 用于计算纯视频专家亲和度
-
-| 数据集 | 规模 | 说明 |
-|--------|------|------|
-| Kinetics-400/700 | 306K/650K clips | 动作识别 |
-| MSR-VTT | 10K clips | 视频描述 |
-| VATEX | 41K clips | 多语言视频描述 |
-| YouCook2 | 2K videos | 烹饪教学 |
-| LongVideoBench | 3.7K videos | 长视频理解 |
-| ActivityNet-QA | 58K QA | 视频问答 |
-
-### Mixed (S3) - 用于音视频联合校准
-
-| 数据集 | 规模 | 说明 |
-|--------|------|------|
-| VoxCeleb | 1M+ utterances | 说话人识别 |
-| LRS2/LRS3 | 数千句子 | 音视频语音识别 |
-| How2 | 80K clips | 教学视频 |
-| AudioSet | 2M+ clips | 音频事件 |
-| VGGSound | 210K videos | 音视频对应 |
-| MELD | TV episodes | 情感对话 |
-| HowTo100M | 136M clips | 大规模教学 |
-
-## 🔄 格式转换
-
-### 统一输出格式（REAP-OMNI）
-
-所有数据集都会转换为统一的 JSONL 格式：
-
-```json
-{
-    "id": "librispeech_00001",
-    "text": "转录文本或描述",
-    "audio": "/path/to/audio.wav",
-    "video": "/path/to/video.mp4",
-    "modality": "audio"
-}
-```
-
-### 基础转换命令
+### 5. 处理所有已下载数据集
 
 ```bash
-# CSV 转 JSONL
-python convert_utils.py csv input.csv output.jsonl --text-col caption --audio-col path
+# 自动检测并处理所有数据集
+python scripts/process.py --input ./data --output ./output --merge
 
-# JSON 转 JSONL
-python convert_utils.py json input.json output.jsonl --text-key text --video-key video_path
-
-# 文件夹转 JSONL
-python convert_utils.py folder ./my_data output.jsonl --name my_dataset
-
-# 合并多个 JSONL
-python convert_utils.py merge audio1.jsonl audio2.jsonl -o merged.jsonl
-
-# 按模态分割
-python convert_utils.py split all_data.jsonl -o ./split_output
-
-# 验证格式
-python convert_utils.py validate calibration/audio.jsonl
+# 处理为 GRPO 格式（仅 prompt）
+python scripts/process.py --input ./data --output ./output --task grpo
 ```
 
----
+## 📊 支持的数据集处理器
 
-## 🤖 MS-SWIFT 格式转换
+| 数据集 | HF ID | 语言 | 任务 | 需认证 |
+|--------|-------|------|------|--------|
+| librispeech | openslr/librispeech_asr | en | ASR | ❌ |
+| common_voice | mozilla-foundation/common_voice_17_0 | en | ASR | ✅ |
+| common_voice_zh | mozilla-foundation/common_voice_17_0 | zh | ASR | ✅ |
+| gigaspeech | speechcolab/gigaspeech | en | ASR | ✅ |
+| aishell1 | AISHELL/AISHELL-1 | zh | ASR | ❌ |
+| wavcaps | cvssp/WavCaps | en | Audio Captioning | ❌ |
 
-支持将数据转换为 [MS-SWIFT](https://github.com/modelscope/ms-swift) 训练框架所需的格式，用于 Qwen3-Omni 等多模态模型的 SFT 和 GRPO 训练。
+## 🔄 数据格式
 
-### MS-SWIFT 数据格式说明
+### 处理后输出格式 (MS-SWIFT SFT)
 
-#### SFT 训练格式（包含完整问答对）
+每个处理器将数据转换为 MS-SWIFT 兼容的 JSONL 格式：
 
 ```jsonl
-{"messages": [{"role": "user", "content": "<audio>What did the audio say?"}, {"role": "assistant", "content": "The speaker said hello."}], "audios": ["/path/to/audio.wav"]}
-{"messages": [{"role": "user", "content": "<video>Describe this video"}, {"role": "assistant", "content": "A cat is playing."}], "videos": ["/path/to/video.mp4"]}
-{"messages": [{"role": "user", "content": "<image>What is in this image?"}, {"role": "assistant", "content": "This is a dog."}], "images": ["/path/to/image.jpg"]}
-{"messages": [{"role": "system", "content": "You are helpful"}, {"role": "user", "content": "Hello"}, {"role": "assistant", "content": "Hi!"}]}
+{"messages": [{"role": "user", "content": "<audio>Transcribe the following audio exactly as spoken."}, {"role": "assistant", "content": "Hello world."}], "audios": ["/absolute/path/to/audio.wav"]}
 ```
 
-#### GRPO 训练格式（仅包含提示）
+### 目录结构
 
-```jsonl
-{"messages": [{"role": "user", "content": "<image>Solve this math problem"}], "images": ["/path/to/image.jpg"]}
-{"messages": [{"role": "user", "content": "<audio>Transcribe and answer"}], "audios": ["/path/to/audio.wav"]}
-{"messages": [{"role": "user", "content": "What is 1+1?"}]}
+处理后的输出结构：
+
+```
+output/
+├── librispeech/
+│   ├── sft.jsonl           # MS-SWIFT 格式数据
+│   ├── audio/              # 提取的音频文件
+│   └── metadata.json       # 处理元数据
+├── aishell1/
+│   └── ...
+└── all_sft.jsonl           # 合并后的数据（使用 --merge）
 ```
 
-#### 格式关键规则
+## 🔧 处理器架构
 
-| 元素 | 说明 |
-|------|------|
-| `<image>` | 在 content 中标记图片插入位置 |
-| `<video>` | 在 content 中标记视频插入位置 |
-| `<audio>` | 在 content 中标记音频插入位置 |
-| `images` | 图片文件路径列表（建议使用绝对路径） |
-| `videos` | 视频文件路径列表 |
-| `audios` | 音频文件路径列表 |
-
-### 转换命令
-
-```bash
-# 将统一格式转换为 MS-SWIFT SFT 格式
-python convert_utils.py msswift input.jsonl output_sft.jsonl --task sft
-
-# 将统一格式转换为 MS-SWIFT GRPO 格式（只保留prompt）
-python convert_utils.py msswift input.jsonl output_grpo.jsonl --task grpo
-
-# 添加系统提示
-python convert_utils.py msswift input.jsonl output.jsonl --task sft --system "You are a helpful assistant."
-
-# 自定义用户消息模板
-python convert_utils.py msswift input.jsonl output.jsonl --task sft --user-template "{modality_tag}Please describe: {text}"
-
-# 将 QA 格式数据转换为 MS-SWIFT 格式
-python convert_utils.py qa-msswift qa_data.jsonl output.jsonl \
-    --question-key question \
-    --answer-key answer \
-    --image-key image \
-    --audio-key audio
-
-# 验证 MS-SWIFT 格式
-python convert_utils.py validate-msswift output.jsonl
-```
-
-### Python API 使用
+每个数据集有独立的处理器类，了解其特有的数据格式：
 
 ```python
-from convert_utils import (
-    convert_unified_to_msswift,
-    convert_qa_to_msswift,
-    create_msswift_sample,
-    validate_msswift_format
-)
+from processors import create_processor, ProcessorConfig
 
-# 批量转换统一格式到 MS-SWIFT
-convert_unified_to_msswift(
-    "unified_data.jsonl", 
-    "msswift_sft.jsonl", 
+# 创建处理器
+processor = create_processor(
+    name="librispeech",
+    data_dir=Path("./data/librispeech"),
+    output_dir=Path("./output"),
+    max_samples=1000,
     task_type="sft",
-    system_prompt="You are a helpful assistant."
+    system_prompt="You are a helpful assistant.",
 )
 
-# 转换 QA 格式数据
-convert_qa_to_msswift(
-    "qa_data.jsonl",
-    "msswift_qa.jsonl",
-    question_key="question",
-    answer_key="answer",
-    audio_key="audio_path"
-)
-
-# 创建单个样本
-sample = create_msswift_sample(
-    user_content="<audio>What did the speaker say?",
-    assistant_content="Hello world.",
-    system_prompt="You are helpful.",
-    audios=["/path/to/audio.wav"]
-)
-
-# 验证格式
-stats = validate_msswift_format("output.jsonl")
-print(f"Valid: {stats['valid']}, SFT: {stats['sft_samples']}, GRPO: {stats['grpo_samples']}")
+# 执行处理
+stats = processor.process()
+print(f"Processed {stats['processed']} samples")
 ```
 
-### 完整工作流示例
+### 添加新数据集处理器
 
-```bash
-# 1. 下载数据集
-python download_datasets.py --dataset librispeech --output ./data --samples 1000
+1. 在 `processors/` 目录创建新文件（如 `my_dataset.py`）
+2. 继承 `BaseProcessor` 或 `ParquetProcessor`
+3. 实现必需方法：
+   - `get_dataset_info()` - 返回数据集元数据
+   - `iter_samples()` - 迭代原始样本
+   - `process_sample()` - 转换单个样本
+4. 在 `__init__.py` 中注册处理器
 
-# 2. 转换为 MS-SWIFT SFT 格式
-python convert_utils.py msswift ./data/calibration/audio.jsonl ./sft_data.jsonl --task sft
+```python
+from .base import ParquetProcessor, Sample
 
-# 3. 验证格式
-python convert_utils.py validate-msswift ./sft_data.jsonl
-
-# 4. 使用 MS-SWIFT 训练（参见 ms-swift/bash_scripts/）
-cd ../ms-swift
-bash bash_scripts/qwen3_omni_sft_lora.sh
+class MyDatasetProcessor(ParquetProcessor):
+    def get_dataset_info(self):
+        return {"name": "my_dataset", "modality": "audio", ...}
+    
+    def iter_samples(self):
+        for pq_file in self.find_parquet_files():
+            yield from self.iter_parquet_rows(pq_file)
+    
+    def process_sample(self, raw_sample, idx):
+        # 转换逻辑
+        return Sample(id=..., text=..., audio_path=...)
 ```
 
----
+## 🤖 MS-SWIFT 集成
 
-## 🔧 与 REAP-OMNI 集成
-
-下载完成后，可以直接用于 REAP 专家剪枝：
+处理后的数据可直接用于 MS-SWIFT 训练：
 
 ```bash
-python ../reap_expert_pruning.py \
-    --model-path /path/to/model \
-    --output-path /path/to/output \
-    --audio-data ./calibration_data/calibration/audio.jsonl \
-    --video-data ./calibration_data/calibration/video.jsonl \
-    --mixed-data ./calibration_data/calibration/mixed.jsonl \
-    --retention-rate 0.5 \
-    --calibration-samples 100
+# 使用处理后的数据进行 SFT 训练
+swift sft \
+    --dataset ./output/all_sft.jsonl \
+    --model Qwen/Qwen3-Omni-7B-Instruct \
+    --output_dir ./sft_output
 ```
 
 ## ⚠️ 注意事项
 
-1. **数据集协议**: 部分数据集需要同意使用协议才能下载
-   - Common Voice: 需要 HuggingFace 登录
-   - GigaSpeech: 需要同意协议
-   - VoxCeleb: 需要学术协议
-   - LRS2/LRS3: 需要 BBC R&D 协议
+1. **Common Voice 17.0**: 现在通过 Mozilla Data Collective (MDC) 分发，需要手动下载
 
-2. **存储空间**: 完整数据集可能需要数TB空间，建议只下载需要的样本数
+2. **音频格式**: 
+   - LibriSpeech: FLAC → 自动转换为 WAV
+   - Common Voice: MP3（保持原格式或转换）
 
-3. **网络要求**: 部分数据集从 HuggingFace 下载，建议使用稳定网络
+3. **存储空间**: 完整数据集可能需要数 TB 空间
 
-4. **GPU 显存**: 使用校准数据进行模型推理时需要足够的 GPU 显存
+4. **路径格式**: 输出使用绝对路径，确保跨环境兼容
 
-5. **路径格式**: MS-SWIFT 格式中的媒体路径建议使用**绝对路径**
+5. **依赖安装**:
+   ```bash
+   pip install datasets soundfile pyarrow pandas huggingface_hub
+   ```
 
 ## 📚 参考资料
 
-- [DATASETS_CATALOG.md](./DATASETS_CATALOG.md) - 详细的数据集信息
-- [MS-SWIFT 官方文档](https://swift.readthedocs.io/) - MS-SWIFT 使用指南
-- [MS-SWIFT 自定义数据集](https://swift.readthedocs.io/en/latest/Customization/Custom-dataset.html) - 数据格式详细说明
+- [DATASETS_CATALOG.md](./DATASETS_CATALOG.md) - 完整数据集目录
+- [MS-SWIFT 文档](https://swift.readthedocs.io/) - 训练框架指南
+- [HuggingFace Hub CLI](https://huggingface.co/docs/huggingface_hub/guides/cli) - 下载工具

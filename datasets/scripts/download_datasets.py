@@ -1,927 +1,625 @@
 #!/usr/bin/env python3
 """
-REAP-OMNI 多模态数据集下载与转换脚本
+Audio Dataset Download Script for Speech SFT.
 
-本脚本实现以下功能：
-1. 自动下载支持的数据集
-2. 将所有数据转换为统一格式
-3. 生成 JSONL 格式的校准数据
+Downloads audio datasets from HuggingFace for SFT training.
+Parses DATASETS_CATALOG.md to extract HuggingFace dataset IDs.
 
-统一输出格式:
-{
-    "id": "dataset_name_00001",
-    "text": "源文本（如有）",
-    "audio": "path/to/audio.wav",  # 如有
-    "video": "path/to/video.mp4"   # 如有
-}
+Features:
+- Parse catalog markdown to extract HF dataset IDs
+- Download via huggingface_hub or datasets library
+- Support HF_ENDPOINT mirror and HF_TOKEN authentication
+- Cross-platform path handling (Windows/Linux)
 
 Usage:
-    python download_datasets.py --dataset librispeech --output ./data --samples 100
-    python download_datasets.py --dataset all --output ./data --samples 100
-    python download_datasets.py --list  # 列出所有支持的数据集
+    # Set environment variables first
+    export HF_ENDPOINT=https://hf-mirror.com
+    export HF_TOKEN="your_token_here"
+    
+    # Download all audio datasets
+    python download_datasets.py --output ./data --modality audio
+    
+    # Download specific datasets
+    python download_datasets.py --output ./data --datasets librispeech common_voice
+    
+    # List available datasets from catalog
+    python download_datasets.py --list
 """
 
-import os
-import json
 import argparse
-import hashlib
-import subprocess
-from pathlib import Path
-from typing import Optional, Dict, List, Any, Generator
-from dataclasses import dataclass, field, asdict
-from abc import ABC, abstractmethod
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import json
 import logging
-import huggingface_hub
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+from typing import Optional, Dict, List, Any
+from dataclasses import dataclass, field
 
-# 配置日志
+import numpy as np
+
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger(__name__)
 
 
 @dataclass
-class UnifiedSample:
-    """统一数据格式"""
-    id: str
-    text: Optional[str] = None
-    audio: Optional[str] = None
-    video: Optional[str] = None
-    modality: str = "mixed"  # audio, video, mixed
-    
-    def to_dict(self) -> Dict[str, Any]:
-        """转换为字典，排除None值"""
-        result = {"id": self.id, "modality": self.modality}
-        if self.text is not None:
-            result["text"] = self.text
-        if self.audio is not None:
-            result["audio"] = self.audio
-        if self.video is not None:
-            result["video"] = self.video
-        return result
-
-
-class DatasetDownloader(ABC):
-    """数据集下载器基类"""
-    
-    name: str = "base"
-    modality: str = "mixed"  # audio, video, mixed
+class DatasetInfo:
+    """Information about a dataset from the catalog."""
+    name: str
+    hf_id: str
+    modality: str  # audio, video, mixed
     description: str = ""
-    url: str = ""
+    license: str = ""
+    data_scale: str = ""
     
-    def __init__(self, output_dir: Path, max_samples: int = 100):
-        self.output_dir = output_dir
-        self.max_samples = max_samples
-        self.data_dir = output_dir / self.name
-        self.data_dir.mkdir(parents=True, exist_ok=True)
-        
-    @abstractmethod
-    def download(self) -> bool:
-        """下载数据集，返回是否成功"""
-        pass
     
-    @abstractmethod
-    def convert(self) -> Generator[UnifiedSample, None, None]:
-        """转换为统一格式，yield UnifiedSample"""
-        pass
+# Pre-defined dataset registry with HF paths and processing info
+# Extracted from DATASETS_CATALOG.md
+DATASET_REGISTRY: Dict[str, Dict[str, Any]] = {
+    # === Audio-only (S1) ===
+    "librispeech": {
+        "hf_path": "openslr/librispeech_asr",
+        "hf_config": "clean",
+        "split": "train.clean.100",
+        "audio_key": "audio",
+        "text_key": "text",
+        "modality": "audio",
+        "description": "English audiobook ASR dataset",
+        "extra_keys": ["speaker_id", "chapter_id"],
+    },
+    "common_voice": {
+        "hf_path": "mozilla-foundation/common_voice_15_0",
+        "hf_config": "en",
+        "split": "train",
+        "audio_key": "audio",
+        "text_key": "sentence",
+        "modality": "audio",
+        "description": "Multilingual crowdsourced ASR",
+        "requires_auth": True,
+        "extra_keys": ["age", "gender", "accent"],
+    },
+    "gigaspeech": {
+        "hf_path": "speechcolab/gigaspeech",
+        "hf_config": "xs",
+        "split": "train",
+        "audio_key": "audio",
+        "text_key": "text",
+        "modality": "audio",
+        "description": "Large-scale English ASR",
+        "requires_auth": True,
+    },
+    "voxpopuli": {
+        "hf_path": "facebook/voxpopuli",
+        "hf_config": "en",
+        "split": "train",
+        "audio_key": "audio",
+        "text_key": "normalized_text",
+        "modality": "audio",
+        "description": "European Parliament multilingual corpus",
+    },
+    "wenetspeech": {
+        "hf_path": "wenet-e2e/wenetspeech",
+        "hf_config": None,
+        "split": "train_s",
+        "audio_key": "audio",
+        "text_key": "text",
+        "modality": "audio",
+        "description": "Large-scale Chinese ASR",
+    },
+    "aishell1": {
+        "hf_path": "AISHELL/AISHELL-1",
+        "hf_config": None,
+        "split": "train",
+        "audio_key": "audio",
+        "text_key": "text",
+        "modality": "audio",
+        "description": "Chinese Mandarin ASR",
+    },
+    "covost2": {
+        "hf_path": "facebook/covost2",
+        "hf_config": "en_zh-CN",
+        "split": "train",
+        "audio_key": "audio",
+        "text_key": "sentence",
+        "modality": "audio",
+        "description": "Multilingual speech translation",
+        "requires_auth": True,
+        "extra_keys": ["translation"],
+    },
+    "libritts": {
+        "hf_path": "openslr/libritts",
+        "hf_config": "clean",
+        "split": "train.clean.100",
+        "audio_key": "audio",
+        "text_key": "text_normalized",
+        "modality": "audio",
+        "description": "English TTS dataset",
+    },
+    "wavcaps": {
+        "hf_path": "cvssp/WavCaps",
+        "hf_config": None,
+        "split": "train",
+        "audio_key": "audio",
+        "text_key": "caption",
+        "modality": "audio",
+        "description": "Audio captioning dataset",
+    },
     
-    def process(self) -> List[UnifiedSample]:
-        """完整处理流程"""
-        logger.info(f"Processing dataset: {self.name}")
-        
-        if not self.download():
-            logger.error(f"Failed to download {self.name}")
-            return []
-        
-        samples = []
-        for i, sample in enumerate(self.convert()):
-            if i >= self.max_samples:
-                break
-            samples.append(sample)
-            
-        logger.info(f"Processed {len(samples)} samples from {self.name}")
-        return samples
-
-
-# ============== Audio-only Datasets ==============
-
-class LibriSpeechDownloader(DatasetDownloader):
-    """LibriSpeech ASR 数据集"""
+    # === Video-only (S2) ===
+    "youcook2": {
+        "hf_path": "merve/YouCook2",
+        "hf_config": None,
+        "split": "train",
+        "video_key": "video",
+        "text_key": "caption",
+        "modality": "video",
+        "description": "Cooking instruction videos",
+    },
+    "longvideobench": {
+        "hf_path": "longvideobench/LongVideoBench",
+        "hf_config": None,
+        "split": "test",
+        "video_key": "video",
+        "text_key": "question",
+        "modality": "video",
+        "description": "Long video understanding",
+    },
+    "videochat2_it": {
+        "hf_path": "OpenGVLab/VideoChat2-IT",
+        "hf_config": None,
+        "split": "train",
+        "video_key": "video",
+        "text_key": "conversations",
+        "modality": "video",
+        "description": "Video chat instruction tuning",
+    },
     
-    name = "librispeech"
-    modality = "audio"
-    description = "英语朗读语音识别数据集，来自LibriVox有声读物"
-    url = "https://huggingface.co/datasets/openslr/librispeech_asr"
-    
-    def download(self) -> bool:
-        try:
-            from datasets import load_dataset
-            logger.info("Loading LibriSpeech from HuggingFace...")
-            self.dataset = load_dataset(
-                "openslr/librispeech_asr", 
-                "clean",
-                split="train.100",
-                trust_remote_code=True
-            )
-            return True
-        except Exception as e:
-            logger.error(f"Error loading LibriSpeech: {e}")
-            return False
-    
-    def convert(self) -> Generator[UnifiedSample, None, None]:
-        import soundfile as sf
-        
-        audio_dir = self.data_dir / "audio"
-        audio_dir.mkdir(exist_ok=True)
-        
-        for idx, item in enumerate(self.dataset):
-            if idx >= self.max_samples:
-                break
-                
-            # 保存音频文件
-            audio_path = audio_dir / f"{self.name}_{idx:05d}.wav"
-            audio_array = item["audio"]["array"]
-            sample_rate = item["audio"]["sampling_rate"]
-            sf.write(str(audio_path), audio_array, sample_rate)
-            
-            yield UnifiedSample(
-                id=f"{self.name}_{idx:05d}",
-                text=item["text"],
-                audio=str(audio_path),
-                modality="audio"
-            )
-
-
-class CommonVoiceDownloader(DatasetDownloader):
-    """Mozilla Common Voice 数据集"""
-    
-    name = "common_voice"
-    modality = "audio"
-    description = "多语言众包语音识别数据集"
-    url = "https://huggingface.co/datasets/fsicoli/common_voice_15_0"
-    
-    def download(self) -> bool:
-        try:
-            from datasets import load_dataset
-            logger.info("Loading Common Voice from HuggingFace...")
-            # 加载英语子集
-            self.dataset = load_dataset(
-                "fsicoli/common_voice_15_0",
-                "en",
-                split="train",
-                trust_remote_code=True
-            )
-            return True
-        except Exception as e:
-            logger.error(f"Error loading Common Voice: {e}")
-            logger.info("Common Voice requires login. Please run: huggingface-cli login")
-            return False
-    
-    def convert(self) -> Generator[UnifiedSample, None, None]:
-        import soundfile as sf
-        
-        audio_dir = self.data_dir / "audio"
-        audio_dir.mkdir(exist_ok=True)
-        
-        for idx, item in enumerate(self.dataset):
-            if idx >= self.max_samples:
-                break
-            
-            try:
-                audio_path = audio_dir / f"{self.name}_{idx:05d}.wav"
-                audio_array = item["audio"]["array"]
-                sample_rate = item["audio"]["sampling_rate"]
-                sf.write(str(audio_path), audio_array, sample_rate)
-                
-                yield UnifiedSample(
-                    id=f"{self.name}_{idx:05d}",
-                    text=item["sentence"],
-                    audio=str(audio_path),
-                    modality="audio"
-                )
-            except Exception as e:
-                logger.warning(f"Error processing sample {idx}: {e}")
-                continue
-
-
-class GigaSpeechDownloader(DatasetDownloader):
-    """GigaSpeech 大规模ASR数据集"""
-    
-    name = "gigaspeech"
-    modality = "audio"
-    description = "10000小时多领域英语ASR数据集"
-    url = "https://huggingface.co/datasets/speechcolab/gigaspeech"
-    
-    def download(self) -> bool:
-        try:
-            from datasets import load_dataset
-            logger.info("Loading GigaSpeech XS subset from HuggingFace...")
-            self.dataset = load_dataset(
-                "speechcolab/gigaspeech",
-                "xs",  # 使用最小子集
-                split="train",
-                trust_remote_code=True
-            )
-            return True
-        except Exception as e:
-            logger.error(f"Error loading GigaSpeech: {e}")
-            logger.info("GigaSpeech requires agreement. Visit the HuggingFace page to accept terms.")
-            return False
-    
-    def convert(self) -> Generator[UnifiedSample, None, None]:
-        import soundfile as sf
-        
-        audio_dir = self.data_dir / "audio"
-        audio_dir.mkdir(exist_ok=True)
-        
-        for idx, item in enumerate(self.dataset):
-            if idx >= self.max_samples:
-                break
-            
-            try:
-                audio_path = audio_dir / f"{self.name}_{idx:05d}.wav"
-                audio_array = item["audio"]["array"]
-                sample_rate = item["audio"]["sampling_rate"]
-                sf.write(str(audio_path), audio_array, sample_rate)
-                
-                yield UnifiedSample(
-                    id=f"{self.name}_{idx:05d}",
-                    text=item["text"],
-                    audio=str(audio_path),
-                    modality="audio"
-                )
-            except Exception as e:
-                logger.warning(f"Error processing sample {idx}: {e}")
-                continue
-
-
-class WavCapsDownloader(DatasetDownloader):
-    """WavCaps 音频描述数据集"""
-    
-    name = "wavcaps"
-    modality = "audio"
-    description = "ChatGPT辅助的音频描述数据集"
-    url = "https://huggingface.co/datasets/cvssp/WavCaps"
-    
-    def download(self) -> bool:
-        try:
-            from datasets import load_dataset
-            logger.info("Loading WavCaps from HuggingFace...")
-            self.dataset = load_dataset(
-                "cvssp/WavCaps",
-                split="train",
-                trust_remote_code=True
-            )
-            return True
-        except Exception as e:
-            logger.error(f"Error loading WavCaps: {e}")
-            return False
-    
-    def convert(self) -> Generator[UnifiedSample, None, None]:
-        import soundfile as sf
-        
-        audio_dir = self.data_dir / "audio"
-        audio_dir.mkdir(exist_ok=True)
-        
-        for idx, item in enumerate(self.dataset):
-            if idx >= self.max_samples:
-                break
-            
-            try:
-                audio_path = audio_dir / f"{self.name}_{idx:05d}.wav"
-                if "audio" in item and item["audio"] is not None:
-                    audio_array = item["audio"]["array"]
-                    sample_rate = item["audio"]["sampling_rate"]
-                    sf.write(str(audio_path), audio_array, sample_rate)
-                    
-                    yield UnifiedSample(
-                        id=f"{self.name}_{idx:05d}",
-                        text=item.get("caption", ""),
-                        audio=str(audio_path),
-                        modality="audio"
-                    )
-            except Exception as e:
-                logger.warning(f"Error processing sample {idx}: {e}")
-                continue
-
-
-# ============== Video-only Datasets ==============
-
-class Kinetics400Downloader(DatasetDownloader):
-    """Kinetics-400 动作识别数据集"""
-    
-    name = "kinetics400"
-    modality = "video"
-    description = "人类动作识别数据集，400类"
-    url = "https://github.com/cvdfoundation/kinetics-dataset"
-    
-    def download(self) -> bool:
-        try:
-            # Kinetics需要特殊处理，这里提供下载脚本路径
-            logger.info("Kinetics-400 requires manual download.")
-            logger.info("Please download from: https://github.com/cvdfoundation/kinetics-dataset")
-            logger.info("Or use: pip install kinetics-dataset")
-            
-            # 尝试加载本地数据
-            video_dir = self.data_dir / "videos"
-            if video_dir.exists() and any(video_dir.iterdir()):
-                self.video_files = list(video_dir.glob("*.mp4"))[:self.max_samples]
-                return True
-            return False
-        except Exception as e:
-            logger.error(f"Error with Kinetics-400: {e}")
-            return False
-    
-    def convert(self) -> Generator[UnifiedSample, None, None]:
-        for idx, video_path in enumerate(self.video_files):
-            if idx >= self.max_samples:
-                break
-            
-            # 从文件名提取标签
-            label = video_path.stem.rsplit("_", 1)[0] if "_" in video_path.stem else ""
-            
-            yield UnifiedSample(
-                id=f"{self.name}_{idx:05d}",
-                text=label,
-                video=str(video_path),
-                modality="video"
-            )
-
-
-class MSRVTTDownloader(DatasetDownloader):
-    """MSR-VTT 视频描述数据集"""
-    
-    name = "msrvtt"
-    modality = "video"
-    description = "视频描述基准数据集"
-    url = "https://cove.thecvf.com/datasets/839"
-    
-    def download(self) -> bool:
-        try:
-            logger.info("MSR-VTT requires manual download.")
-            logger.info("Please download from: https://cove.thecvf.com/datasets/839")
-            
-            video_dir = self.data_dir / "videos"
-            annotations_file = self.data_dir / "annotations.json"
-            
-            if video_dir.exists() and annotations_file.exists():
-                with open(annotations_file) as f:
-                    self.annotations = json.load(f)
-                self.video_dir = video_dir
-                return True
-            return False
-        except Exception as e:
-            logger.error(f"Error with MSR-VTT: {e}")
-            return False
-    
-    def convert(self) -> Generator[UnifiedSample, None, None]:
-        sentences = self.annotations.get("sentences", [])
-        
-        for idx, item in enumerate(sentences):
-            if idx >= self.max_samples:
-                break
-            
-            video_id = item.get("video_id", "")
-            video_path = self.video_dir / f"{video_id}.mp4"
-            
-            if video_path.exists():
-                yield UnifiedSample(
-                    id=f"{self.name}_{idx:05d}",
-                    text=item.get("caption", ""),
-                    video=str(video_path),
-                    modality="video"
-                )
-
-
-class LongVideoBenchDownloader(DatasetDownloader):
-    """LongVideoBench 长视频理解数据集"""
-    
-    name = "longvideobench"
-    modality = "video"
-    description = "长视频理解基准数据集"
-    url = "https://huggingface.co/datasets/longvideobench/LongVideoBench"
-    
-    def download(self) -> bool:
-        try:
-            from datasets import load_dataset
-            logger.info("Loading LongVideoBench from HuggingFace...")
-            self.dataset = load_dataset(
-                "longvideobench/LongVideoBench",
-                split="test",
-                trust_remote_code=True
-            )
-            return True
-        except Exception as e:
-            logger.error(f"Error loading LongVideoBench: {e}")
-            return False
-    
-    def convert(self) -> Generator[UnifiedSample, None, None]:
-        video_dir = self.data_dir / "videos"
-        video_dir.mkdir(exist_ok=True)
-        
-        for idx, item in enumerate(self.dataset):
-            if idx >= self.max_samples:
-                break
-            
-            try:
-                # 获取问题和答案作为文本
-                question = item.get("question", "")
-                
-                yield UnifiedSample(
-                    id=f"{self.name}_{idx:05d}",
-                    text=question,
-                    video=item.get("video_path", None),
-                    modality="video"
-                )
-            except Exception as e:
-                logger.warning(f"Error processing sample {idx}: {e}")
-                continue
-
-
-# ============== Mixed Datasets (Audio + Video) ==============
-
-class VoxCelebDownloader(DatasetDownloader):
-    """VoxCeleb 音视频说话人数据集"""
-    
-    name = "voxceleb"
-    modality = "mixed"
-    description = "音视频说话人识别数据集"
-    url = "https://robots.ox.ac.uk/~vgg/data/voxceleb"
-    
-    def download(self) -> bool:
-        try:
-            logger.info("VoxCeleb requires manual download with agreement.")
-            logger.info("Please visit: https://robots.ox.ac.uk/~vgg/data/voxceleb")
-            
-            # 检查本地数据
-            data_path = self.data_dir / "voxceleb1"
-            if data_path.exists():
-                self.data_path = data_path
-                return True
-            return False
-        except Exception as e:
-            logger.error(f"Error with VoxCeleb: {e}")
-            return False
-    
-    def convert(self) -> Generator[UnifiedSample, None, None]:
-        # VoxCeleb 数据格式: id/video_id/clip_id.wav
-        for idx, audio_file in enumerate(self.data_path.rglob("*.wav")):
-            if idx >= self.max_samples:
-                break
-            
-            # 查找对应的视频文件
-            video_file = audio_file.with_suffix(".mp4")
-            
-            yield UnifiedSample(
-                id=f"{self.name}_{idx:05d}",
-                text=None,  # VoxCeleb 没有文本
-                audio=str(audio_file),
-                video=str(video_file) if video_file.exists() else None,
-                modality="mixed"
-            )
-
-
-class How2Downloader(DatasetDownloader):
-    """How2 多模态教学视频数据集"""
-    
-    name = "how2"
-    modality = "mixed"
-    description = "多模态教学视频数据集"
-    url = "https://srvk.github.io/how2-dataset/"
-    
-    def download(self) -> bool:
-        try:
-            logger.info("How2 dataset requires download from official site.")
-            logger.info("Please visit: https://srvk.github.io/how2-dataset/")
-            
-            data_path = self.data_dir / "how2"
-            if data_path.exists():
-                self.data_path = data_path
-                return True
-            return False
-        except Exception as e:
-            logger.error(f"Error with How2: {e}")
-            return False
-    
-    def convert(self) -> Generator[UnifiedSample, None, None]:
-        # How2 通常有 video_id.mp4, video_id.wav, video_id.txt
-        txt_files = list(self.data_path.glob("*.txt"))
-        
-        for idx, txt_file in enumerate(txt_files):
-            if idx >= self.max_samples:
-                break
-            
-            video_id = txt_file.stem
-            audio_file = txt_file.with_suffix(".wav")
-            video_file = txt_file.with_suffix(".mp4")
-            
-            with open(txt_file, 'r', encoding='utf-8') as f:
-                text = f.read().strip()
-            
-            yield UnifiedSample(
-                id=f"{self.name}_{idx:05d}",
-                text=text,
-                audio=str(audio_file) if audio_file.exists() else None,
-                video=str(video_file) if video_file.exists() else None,
-                modality="mixed"
-            )
-
-
-class LRS2Downloader(DatasetDownloader):
-    """LRS2 音视频语音识别数据集"""
-    
-    name = "lrs2"
-    modality = "mixed"
-    description = "BBC音视频语音识别数据集"
-    url = "https://www.robots.ox.ac.uk/~vgg/data/lip_reading/lrs2.html"
-    
-    def download(self) -> bool:
-        try:
-            logger.info("LRS2 requires agreement with BBC R&D.")
-            logger.info("Please visit: https://www.robots.ox.ac.uk/~vgg/data/lip_reading/lrs2.html")
-            
-            data_path = self.data_dir / "lrs2"
-            if data_path.exists():
-                self.data_path = data_path
-                return True
-            return False
-        except Exception as e:
-            logger.error(f"Error with LRS2: {e}")
-            return False
-    
-    def convert(self) -> Generator[UnifiedSample, None, None]:
-        # LRS2 格式: {split}/{video_id}/{clip_id}.mp4 + .txt
-        mp4_files = list(self.data_path.rglob("*.mp4"))
-        
-        for idx, video_file in enumerate(mp4_files):
-            if idx >= self.max_samples:
-                break
-            
-            txt_file = video_file.with_suffix(".txt")
-            text = ""
-            if txt_file.exists():
-                with open(txt_file, 'r', encoding='utf-8') as f:
-                    text = f.read().strip()
-            
-            # 音频嵌入在视频中
-            yield UnifiedSample(
-                id=f"{self.name}_{idx:05d}",
-                text=text,
-                audio=None,  # 音频在视频内
-                video=str(video_file),
-                modality="mixed"
-            )
-
-
-class AudioSetDownloader(DatasetDownloader):
-    """AudioSet 大规模音频数据集"""
-    
-    name = "audioset"
-    modality = "mixed"
-    description = "大规模音频事件分类数据集"
-    url = "https://research.google.com/audioset/"
-    
-    def download(self) -> bool:
-        try:
-            logger.info("AudioSet requires downloading from YouTube using official tools.")
-            logger.info("Please visit: https://research.google.com/audioset/download.html")
-            
-            # 检查本地数据
-            data_path = self.data_dir / "audioset"
-            if data_path.exists():
-                self.data_path = data_path
-                # 尝试加载标签文件
-                labels_file = data_path / "balanced_train_segments.csv"
-                if labels_file.exists():
-                    self.labels = self._load_labels(labels_file)
-                    return True
-            return False
-        except Exception as e:
-            logger.error(f"Error with AudioSet: {e}")
-            return False
-    
-    def _load_labels(self, labels_file: Path) -> Dict:
-        """加载AudioSet标签文件"""
-        labels = {}
-        with open(labels_file, 'r') as f:
-            for line in f:
-                if line.startswith('#'):
-                    continue
-                parts = line.strip().split(',')
-                if len(parts) >= 4:
-                    ytid = parts[0].strip('"')
-                    labels[ytid] = parts[3:]
-        return labels
-    
-    def convert(self) -> Generator[UnifiedSample, None, None]:
-        audio_files = list(self.data_path.glob("*.wav")) + list(self.data_path.glob("*.flac"))
-        
-        for idx, audio_file in enumerate(audio_files):
-            if idx >= self.max_samples:
-                break
-            
-            ytid = audio_file.stem
-            label_ids = self.labels.get(ytid, [])
-            
-            yield UnifiedSample(
-                id=f"{self.name}_{idx:05d}",
-                text=",".join(label_ids),
-                audio=str(audio_file),
-                video=None,
-                modality="mixed"
-            )
-
-
-class VGGSoundDownloader(DatasetDownloader):
-    """VGGSound 音视频对应数据集"""
-    
-    name = "vggsound"
-    modality = "mixed"
-    description = "音视频对应数据集"
-    url = "https://www.robots.ox.ac.uk/~vgg/data/vggsound/"
-    
-    def download(self) -> bool:
-        try:
-            logger.info("VGGSound requires downloading from official site.")
-            logger.info("Please visit: https://www.robots.ox.ac.uk/~vgg/data/vggsound/")
-            
-            data_path = self.data_dir / "vggsound"
-            if data_path.exists():
-                self.data_path = data_path
-                return True
-            return False
-        except Exception as e:
-            logger.error(f"Error with VGGSound: {e}")
-            return False
-    
-    def convert(self) -> Generator[UnifiedSample, None, None]:
-        video_files = list(self.data_path.glob("*.mp4"))
-        
-        for idx, video_file in enumerate(video_files):
-            if idx >= self.max_samples:
-                break
-            
-            # 从文件名提取标签 (格式: ytid_start_end_label.mp4)
-            parts = video_file.stem.rsplit("_", 1)
-            label = parts[-1] if len(parts) > 1 else ""
-            
-            yield UnifiedSample(
-                id=f"{self.name}_{idx:05d}",
-                text=label.replace("_", " "),
-                audio=None,  # 音频在视频内
-                video=str(video_file),
-                modality="mixed"
-            )
-
-
-# ============== Dataset Registry ==============
-
-DATASET_REGISTRY: Dict[str, type] = {
-    # Audio-only
-    "librispeech": LibriSpeechDownloader,
-    "common_voice": CommonVoiceDownloader,
-    "gigaspeech": GigaSpeechDownloader,
-    "wavcaps": WavCapsDownloader,
-    
-    # Video-only
-    "kinetics400": Kinetics400Downloader,
-    "msrvtt": MSRVTTDownloader,
-    "longvideobench": LongVideoBenchDownloader,
-    
-    # Mixed
-    "voxceleb": VoxCelebDownloader,
-    "how2": How2Downloader,
-    "lrs2": LRS2Downloader,
-    "audioset": AudioSetDownloader,
-    "vggsound": VGGSoundDownloader,
+    # === Mixed (S3) ===
+    "ugc_videocap": {
+        "hf_path": "openinterx/UGC-VideoCap",
+        "hf_config": None,
+        "split": "train",
+        "audio_key": "audio",
+        "video_key": "video",
+        "text_key": "caption",
+        "modality": "mixed",
+        "description": "Short video multimodal captioning",
+    },
 }
 
 
+def normalize_path(path: str | Path) -> Path:
+    """Normalize path for cross-platform compatibility."""
+    path = Path(path)
+    # Resolve to absolute path
+    path = path.resolve()
+    return path
+
+
+def parse_catalog_markdown(catalog_path: Path) -> List[DatasetInfo]:
+    """
+    Parse DATASETS_CATALOG.md to extract dataset information.
+    
+    Args:
+        catalog_path: Path to the catalog markdown file
+        
+    Returns:
+        List of DatasetInfo objects
+    """
+    if not catalog_path.exists():
+        logger.warning(f"Catalog file not found: {catalog_path}")
+        return []
+    
+    datasets = []
+    current_modality = "audio"
+    
+    with open(catalog_path, "r", encoding="utf-8") as f:
+        content = f.read()
+    
+    # Detect modality sections
+    lines = content.split("\n")
+    
+    for line in lines:
+        # Detect section headers
+        if "Audio-only" in line or "纯音频" in line:
+            current_modality = "audio"
+        elif "Video-only" in line or "纯视频" in line:
+            current_modality = "video"
+        elif "Mixed" in line or "音视频混合" in line:
+            current_modality = "mixed"
+        
+        # Parse table rows with HuggingFace links
+        # Format: | Name | Source | Description | ... | [hf_id](url) |
+        if "|" in line and "huggingface.co/datasets/" in line:
+            # Extract HuggingFace dataset ID from URL
+            hf_match = re.search(r'huggingface\.co/datasets/([^\s\)]+)', line)
+            if hf_match:
+                hf_id = hf_match.group(1).rstrip(")")
+                
+                # Extract dataset name from first column
+                parts = [p.strip() for p in line.split("|") if p.strip()]
+                if parts:
+                    name = re.sub(r'\*+', '', parts[0]).strip()
+                    description = parts[2] if len(parts) > 2 else ""
+                    data_scale = parts[5] if len(parts) > 5 else ""
+                    license_info = parts[7] if len(parts) > 7 else ""
+                    
+                    datasets.append(DatasetInfo(
+                        name=name,
+                        hf_id=hf_id,
+                        modality=current_modality,
+                        description=description,
+                        license=license_info,
+                        data_scale=data_scale,
+                    ))
+    
+    return datasets
+
+
+def save_audio(audio_array: np.ndarray, sample_rate: int, output_path: Path) -> bool:
+    """Save audio array to WAV file."""
+    try:
+        import soundfile as sf
+        # Ensure float32 format and normalize if needed
+        audio = np.asarray(audio_array, dtype=np.float32)
+        if audio.max() > 1.0 or audio.min() < -1.0:
+            audio = audio / max(abs(audio.max()), abs(audio.min()))
+        sf.write(str(output_path), audio, sample_rate, format="WAV")
+        return True
+    except ImportError:
+        try:
+            from scipy.io import wavfile
+            audio = np.asarray(audio_array, dtype=np.float32)
+            if audio.max() <= 1.0 and audio.min() >= -1.0:
+                audio = (audio * 32767).astype(np.int16)
+            else:
+                audio = audio.astype(np.int16)
+            wavfile.write(str(output_path), sample_rate, audio)
+            return True
+        except ImportError:
+            logger.error("Neither soundfile nor scipy is available. Install with: pip install soundfile")
+            return False
+
+
+def download_with_datasets_library(
+    name: str,
+    config: Dict[str, Any],
+    output_dir: Path,
+    samples: int = 100,
+    token: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Download dataset using the datasets library.
+    
+    Args:
+        name: Dataset name
+        config: Dataset configuration from registry
+        output_dir: Output directory
+        samples: Number of samples to download
+        token: HuggingFace token
+        
+    Returns:
+        Dictionary with download statistics
+    """
+    try:
+        from datasets import load_dataset
+    except ImportError:
+        return {"name": name, "status": "error", "error": "datasets library not installed"}
+    
+    dataset_dir = output_dir / name
+    audio_dir = dataset_dir / "audio"
+    manifest_path = dataset_dir / "manifest.json"
+    
+    # Check if already exists
+    if manifest_path.exists():
+        logger.info(f"Dataset {name} already exists. Skipping.")
+        return {"name": name, "status": "skipped", "reason": "Already exists"}
+    
+    dataset_dir.mkdir(parents=True, exist_ok=True)
+    audio_dir.mkdir(exist_ok=True)
+    
+    # Load dataset
+    logger.info(f"Downloading {name} from {config['hf_path']}...")
+    
+    try:
+        load_kwargs = {
+            "path": config["hf_path"],
+            "split": config.get("split", "train"),
+            "trust_remote_code": True,
+            "streaming": True,  # Use streaming to avoid downloading entire dataset
+        }
+        if config.get("hf_config"):
+            load_kwargs["name"] = config["hf_config"]
+        if token:
+            load_kwargs["token"] = token
+            
+        dataset = load_dataset(**load_kwargs)
+    except Exception as e:
+        logger.error(f"Failed to load {name}: {e}")
+        return {"name": name, "status": "error", "error": str(e)}
+    
+    # Process samples
+    manifest = []
+    count = 0
+    audio_key = config.get("audio_key", "audio")
+    text_key = config.get("text_key", "text")
+    
+    for idx, sample in enumerate(dataset):
+        if count >= samples:
+            break
+            
+        try:
+            # Handle audio data
+            if audio_key in sample:
+                audio_data = sample[audio_key]
+                
+                # Handle different audio formats
+                if isinstance(audio_data, dict):
+                    audio_array = audio_data.get("array")
+                    sample_rate = audio_data.get("sampling_rate", 16000)
+                else:
+                    continue
+                
+                if audio_array is None:
+                    continue
+                
+                # Save audio file
+                audio_filename = f"{name}_{idx:06d}.wav"
+                audio_path = audio_dir / audio_filename
+                
+                if not save_audio(audio_array, sample_rate, audio_path):
+                    continue
+                
+                # Build manifest entry
+                entry = {
+                    "id": f"{name}_{idx}",
+                    "audio_path": str(audio_path.relative_to(output_dir)),
+                    "audio_abs_path": str(normalize_path(audio_path)),
+                    "text": sample.get(text_key, ""),
+                    "modality": config.get("modality", "audio"),
+                }
+                
+                # Add extra keys
+                for key in config.get("extra_keys", []):
+                    if key in sample:
+                        entry[key] = sample[key]
+                
+                manifest.append(entry)
+                count += 1
+                
+                if count % 50 == 0:
+                    logger.info(f"  Processed {count}/{samples} samples...")
+                    
+        except Exception as e:
+            logger.warning(f"Failed to process sample {idx}: {e}")
+            continue
+    
+    # Save manifest
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        json.dump({
+            "name": name,
+            "hf_path": config["hf_path"],
+            "description": config.get("description", ""),
+            "modality": config.get("modality", "audio"),
+            "num_samples": len(manifest),
+            "samples": manifest,
+        }, f, indent=2, ensure_ascii=False)
+    
+    logger.info(f"Downloaded {name}: {len(manifest)} samples saved to {dataset_dir}")
+    
+    return {
+        "name": name,
+        "status": "success",
+        "num_samples": len(manifest),
+        "output_dir": str(dataset_dir),
+    }
+
+
+def download_with_hf_cli(
+    hf_id: str,
+    output_dir: Path,
+    token: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Download dataset using huggingface-cli.
+    
+    Args:
+        hf_id: HuggingFace dataset ID
+        output_dir: Output directory
+        token: HuggingFace token
+        
+    Returns:
+        Dictionary with download statistics
+    """
+    cmd = [
+        "huggingface-cli", "download",
+        "--repo-type", "dataset",
+        hf_id,
+        "--local-dir", str(output_dir / hf_id.replace("/", "_")),
+    ]
+    
+    if token:
+        cmd.extend(["--token", token])
+    
+    try:
+        logger.info(f"Running: {' '.join(cmd)}")
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
+        
+        if result.returncode == 0:
+            return {"hf_id": hf_id, "status": "success"}
+        else:
+            return {"hf_id": hf_id, "status": "error", "error": result.stderr}
+    except subprocess.TimeoutExpired:
+        return {"hf_id": hf_id, "status": "error", "error": "Download timed out"}
+    except Exception as e:
+        return {"hf_id": hf_id, "status": "error", "error": str(e)}
+
+
 def list_datasets():
-    """列出所有支持的数据集"""
+    """Print available datasets."""
     print("\n" + "=" * 80)
-    print("REAP-OMNI 支持的数据集")
+    print("Available Datasets for Download")
     print("=" * 80)
     
-    audio_datasets = []
-    video_datasets = []
-    mixed_datasets = []
+    for modality in ["audio", "video", "mixed"]:
+        datasets = {k: v for k, v in DATASET_REGISTRY.items() if v.get("modality") == modality}
+        if datasets:
+            print(f"\n[{modality.upper()}]")
+            for name, config in datasets.items():
+                auth = " [AUTH]" if config.get("requires_auth") else ""
+                print(f"  {name:20} - {config.get('description', '')}{auth}")
     
-    for name, cls in DATASET_REGISTRY.items():
-        info = {"name": name, "description": cls.description, "url": cls.url}
-        if cls.modality == "audio":
-            audio_datasets.append(info)
-        elif cls.modality == "video":
-            video_datasets.append(info)
-        else:
-            mixed_datasets.append(info)
-    
-    print("\n📢 Audio-only 数据集 (S1):")
-    print("-" * 40)
-    for ds in audio_datasets:
-        print(f"  • {ds['name']}: {ds['description']}")
-        print(f"    URL: {ds['url']}")
-    
-    print("\n🎬 Video-only 数据集 (S2):")
-    print("-" * 40)
-    for ds in video_datasets:
-        print(f"  • {ds['name']}: {ds['description']}")
-        print(f"    URL: {ds['url']}")
-    
-    print("\n🔀 Mixed 数据集 (S3):")
-    print("-" * 40)
-    for ds in mixed_datasets:
-        print(f"  • {ds['name']}: {ds['description']}")
-        print(f"    URL: {ds['url']}")
-    
-    print("\n" + "=" * 80)
-
-
-def save_jsonl(samples: List[UnifiedSample], output_path: Path, modality: str):
-    """保存为JSONL格式"""
-    output_file = output_path / f"{modality}.jsonl"
-    
-    with open(output_file, 'w', encoding='utf-8') as f:
-        for sample in samples:
-            f.write(json.dumps(sample.to_dict(), ensure_ascii=False) + '\n')
-    
-    logger.info(f"Saved {len(samples)} samples to {output_file}")
-    return output_file
-
-
-def process_datasets(
-    datasets: List[str],
-    output_dir: Path,
-    max_samples: int = 100
-) -> Dict[str, List[UnifiedSample]]:
-    """处理多个数据集"""
-    
-    results = {
-        "audio": [],
-        "video": [],
-        "mixed": []
-    }
-    
-    for ds_name in datasets:
-        if ds_name not in DATASET_REGISTRY:
-            logger.warning(f"Unknown dataset: {ds_name}")
-            continue
-        
-        downloader_cls = DATASET_REGISTRY[ds_name]
-        downloader = downloader_cls(output_dir, max_samples)
-        
-        try:
-            samples = downloader.process()
-            results[downloader.modality].extend(samples)
-        except Exception as e:
-            logger.error(f"Error processing {ds_name}: {e}")
-            continue
-    
-    return results
+    print("\n" + "-" * 80)
+    print("[AUTH] = Requires HuggingFace authentication")
+    print("=" * 80 + "\n")
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="REAP-OMNI 多模态数据集下载与转换工具",
+        description="Download audio datasets for Speech SFT training",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # 列出所有支持的数据集
-  python download_datasets.py --list
-  
-  # 下载单个数据集
-  python download_datasets.py --dataset librispeech --output ./data --samples 100
-  
-  # 下载多个数据集
-  python download_datasets.py --dataset librispeech gigaspeech --output ./data
-  
-  # 下载所有数据集
-  python download_datasets.py --dataset all --output ./data
-  
-  # 按模态下载
-  python download_datasets.py --modality audio --output ./data
-        """
-    )
-    
-    parser.add_argument(
-        "--list", "-l",
-        action="store_true",
-        help="列出所有支持的数据集"
-    )
-    
-    parser.add_argument(
-        "--dataset", "-d",
-        nargs="+",
-        default=[],
-        help="要下载的数据集名称，使用 'all' 下载全部"
-    )
-    
-    parser.add_argument(
-        "--modality", "-m",
-        choices=["audio", "video", "mixed", "all"],
-        default=None,
-        help="按模态类型下载"
     )
     
     parser.add_argument(
         "--output", "-o",
-        type=Path,
-        default=Path("./data"),
-        help="输出目录"
+        type=str,
+        default="./data",
+        help="Output directory (default: ./data)"
     )
-    
     parser.add_argument(
-        "--samples", "-s",
+        "--datasets", "-d",
+        nargs="+",
+        type=str,
+        default=None,
+        help="Specific datasets to download (default: all)"
+    )
+    parser.add_argument(
+        "--modality", "-m",
+        type=str,
+        choices=["audio", "video", "mixed", "all"],
+        default="audio",
+        help="Modality to download (default: audio)"
+    )
+    parser.add_argument(
+        "--samples", "-n",
         type=int,
         default=100,
-        help="每个数据集的最大样本数"
+        help="Number of samples per dataset (default: 100)"
     )
-    
     parser.add_argument(
         "--token", "-t",
         type=str,
-        help="HuggingFace Access Token (用于下载受限数据集)"
+        default=None,
+        help="HuggingFace token (or set HF_TOKEN env var)"
     )
-
     parser.add_argument(
-        "--verbose", "-v",
+        "--catalog",
+        type=str,
+        default=None,
+        help="Path to DATASETS_CATALOG.md (optional)"
+    )
+    parser.add_argument(
+        "--list",
         action="store_true",
-        help="显示详细日志"
+        help="List available datasets and exit"
+    )
+    parser.add_argument(
+        "--use-cli",
+        action="store_true",
+        help="Use huggingface-cli for downloading instead of datasets library"
     )
     
     args = parser.parse_args()
     
-    if args.verbose:
-        logging.getLogger().setLevel(logging.DEBUG)
-    
-    # HuggingFace 登录
-    if args.token:
-        try:
-            logger.info(f"Logging in to HuggingFace with provided token...")
-            huggingface_hub.login(token=args.token)
-            logger.info("Successfully logged in!")
-        except Exception as e:
-            logger.error(f"Failed to login: {e}")
-
     if args.list:
         list_datasets()
         return
     
-    # 确定要处理的数据集
-    datasets_to_process = []
+    # Get token from args or environment
+    token = args.token or os.environ.get("HF_TOKEN")
     
-    if args.modality:
-        if args.modality == "all":
-            datasets_to_process = list(DATASET_REGISTRY.keys())
-        else:
-            for name, cls in DATASET_REGISTRY.items():
-                if cls.modality == args.modality:
-                    datasets_to_process.append(name)
-    elif args.dataset:
-        if "all" in args.dataset:
-            datasets_to_process = list(DATASET_REGISTRY.keys())
-        else:
-            datasets_to_process = args.dataset
+    # Setup output directory
+    output_dir = normalize_path(args.output)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Determine datasets to download
+    if args.datasets:
+        datasets_to_download = {
+            k: v for k, v in DATASET_REGISTRY.items()
+            if k in args.datasets
+        }
+        # Validate
+        invalid = [d for d in args.datasets if d not in DATASET_REGISTRY]
+        if invalid:
+            logger.warning(f"Unknown datasets: {invalid}")
+    elif args.modality == "all":
+        datasets_to_download = DATASET_REGISTRY
     else:
-        parser.print_help()
-        return
+        datasets_to_download = {
+            k: v for k, v in DATASET_REGISTRY.items()
+            if v.get("modality") == args.modality
+        }
     
-    if not datasets_to_process:
-        logger.error("No datasets to process!")
-        return
+    logger.info(f"Downloading {len(datasets_to_download)} datasets to {output_dir}")
+    logger.info(f"Samples per dataset: {args.samples}")
     
-    logger.info(f"Processing datasets: {datasets_to_process}")
-    logger.info(f"Output directory: {args.output}")
-    logger.info(f"Max samples per dataset: {args.samples}")
+    # Check environment
+    hf_endpoint = os.environ.get("HF_ENDPOINT", "https://huggingface.co")
+    logger.info(f"HF_ENDPOINT: {hf_endpoint}")
     
-    # 创建输出目录
-    args.output.mkdir(parents=True, exist_ok=True)
-    calibration_dir = args.output / "calibration"
-    calibration_dir.mkdir(exist_ok=True)
+    # Download each dataset
+    results = []
+    for name, config in datasets_to_download.items():
+        if config.get("requires_auth") and not token:
+            logger.warning(f"Skipping {name}: requires authentication (set HF_TOKEN)")
+            results.append({"name": name, "status": "skipped", "reason": "Requires auth"})
+            continue
+        
+        if args.use_cli:
+            result = download_with_hf_cli(config["hf_path"], output_dir, token)
+            result["name"] = name
+        else:
+            result = download_with_datasets_library(
+                name, config, output_dir, args.samples, token
+            )
+        results.append(result)
     
-    # 处理数据集
-    results = process_datasets(datasets_to_process, args.output, args.samples)
-    
-    # 保存为JSONL
-    for modality, samples in results.items():
-        if samples:
-            save_jsonl(samples, calibration_dir, modality)
-    
-    # 打印摘要
+    # Summary
     print("\n" + "=" * 80)
-    print("处理完成!")
+    print("Download Summary")
     print("=" * 80)
-    print(f"  Audio samples: {len(results['audio'])}")
-    print(f"  Video samples: {len(results['video'])}")
-    print(f"  Mixed samples: {len(results['mixed'])}")
-    print(f"\n校准数据已保存到: {calibration_dir}")
-    print("\n可用于 REAP-OMNI 的命令:")
-    print(f"  python reap_expert_pruning.py \\")
-    print(f"      --audio-data {calibration_dir / 'audio.jsonl'} \\")
-    print(f"      --video-data {calibration_dir / 'video.jsonl'} \\")
-    print(f"      --mixed-data {calibration_dir / 'mixed.jsonl'}")
+    
+    success = [r for r in results if r["status"] == "success"]
+    skipped = [r for r in results if r["status"] == "skipped"]
+    errors = [r for r in results if r["status"] == "error"]
+    
+    print(f"\nSuccessful: {len(success)}")
+    for r in success:
+        samples = r.get("num_samples", "N/A")
+        print(f"  [OK] {r['name']}: {samples} samples")
+    
+    if skipped:
+        print(f"\nSkipped: {len(skipped)}")
+        for r in skipped:
+            print(f"  [-] {r['name']}: {r.get('reason', 'Unknown')}")
+    
+    if errors:
+        print(f"\nErrors: {len(errors)}")
+        for r in errors:
+            print(f"  [X] {r['name']}: {r.get('error', 'Unknown error')}")
+    
+    # Save summary
+    summary_path = output_dir / "download_summary.json"
+    with open(summary_path, "w", encoding="utf-8") as f:
+        json.dump({"results": results}, f, indent=2, ensure_ascii=False)
+    
+    print(f"\nSummary saved to: {summary_path}")
+    print("=" * 80 + "\n")
 
 
 if __name__ == "__main__":

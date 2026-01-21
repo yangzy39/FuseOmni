@@ -8,8 +8,12 @@ __pycache__/
 
 # Distribution / packaging
 .Python
+vllm-omni/
 survey/
+datasets/data
+datasets/*.sh
 models/
+models/*
 build/
 develop-eggs/
 dist/
