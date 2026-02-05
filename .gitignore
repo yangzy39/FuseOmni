@@ -9,6 +9,7 @@ __pycache__/
 # Distribution / packaging
 .Python
 ms-swift/bash_scripts
+ms-swift/*.sh
 vllm-omni/
 survey/
 LLaMA-Factory/

@@ -21,7 +21,7 @@
 set -e
 
 # ========================= Configuration =========================
-MODEL_PATH="/mnt/afs/00036/yzy/FuseOmni/models"
+MODEL_PATH="/mnt/afs/00036/project_fuseomni/FuseOmni/models"
 MODEL_ID="Qwen3-Omni-30B-A3B-Instruct"
 DATASET="/path/to/your/sft_data.jsonl"
 OUTPUT_DIR="./output/qwen3_omni_sft_full"

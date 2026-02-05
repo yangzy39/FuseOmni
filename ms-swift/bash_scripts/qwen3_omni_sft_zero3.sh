@@ -9,10 +9,11 @@ CONDA_ENV="fuseomni"
 source ${CONDA_PATH} ${CONDA_ENV}
 
 # ========================= Configuration =========================
-MODEL_PATH="/mnt/afs/00036/yzy/FuseOmni/models"
+MODEL_PATH="/mnt/afs/00036/project_fuseomni/models"
 MODEL_ID="Qwen3-Omni-30B-A3B-Instruct"
 # DATASET="/path/to/your/sft_data.jsonl"
-OUTPUT_DIR="/mnt/afs/00036/yzy/checkpoints/qwen3_omni_sft_full"
+OUTPUT_DIR="/mnt/afs/00036/project_fuseomni/checkpoints/qwen3_omni_sft_full"
+export MODELSCOPE_CACHE=/mnt/afs/00036/project_fuseomni/FuseOmni/datasets/data
 
 # GPU Configuration
 CUDA_DEVICES="0,1"
@@ -27,8 +28,8 @@ swift sft \
     --model ${MODEL_PATH}/${MODEL_ID} \
     --dataset 'AI-ModelScope/alpaca-gpt4-data-zh#10000' \
               'AI-ModelScope/LaTeX_OCR:human_handwrite#5000' \
-              'speech_asr/speech_asr_aishell1_trainsets:train#5000' \
-              'modelscope/speech_asr_commonvoice_en_trainsets:train#5000' \
+              'speech_asr/speech_asr_aishell1_trainsets:default#5000' \
+              'modelscope/speech_asr_commonvoice_en_trainsets:default#5000' \
     --split_dataset_ratio 0.01 \
     --load_from_cache_file true \
     --tuner_type lora \

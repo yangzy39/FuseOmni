@@ -37,12 +37,12 @@ GPU_NUMS=${2:-2}
 WORKER_NODES=${3:-1}
 
 # ========== PATHS (modify these to match your environment) ==========
-CODE_DIR="/mnt/afs/00036/yzy/FuseOmni/ydj"
-QUEUE_ROOT="/mnt/afs/00036/yzy/gpu_queue"
+CODE_DIR="/mnt/afs/00036/project_fuseomni/FuseOmni/ydj"
+export QUEUE_ROOT="/mnt/afs/00036/project_fuseomni/gpu_queue"
 
 # Conda environment
 CONDA_PATH="/mnt/afs/00036/software/conda/bin/activate"
-CONDA_ENV="swift"
+CONDA_ENV="fuseomni"
 
 # ========== JOB SUBMISSION ==========
 echo "=========================================="
@@ -58,7 +58,7 @@ echo ""
 sco acp jobs create \
   --workspace-name=share-space \
   --aec2-name=share-cluster \
-  --job-name=ydj-${JOB_ID} \
+  --job-name=${JOB_ID} \
   --container-image-url="registry.cn-sh-01.sensecore.cn/lepton-trainingjob/nvidia24.04-ubuntu22.04-py3.10-cuda12.4-cudnn9.1-torch2.3.0-transformerengine1.5:v1.0.0-20241130-nvdia-base-image" \
   --training-framework=pytorch \
   --worker-nodes=${WORKER_NODES} \

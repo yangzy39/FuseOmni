@@ -15,7 +15,7 @@ if [ -z "$JOB_ID" ]; then
     export JOB_ID="default"
 fi
 
-export QUEUE_ROOT="${QUEUE_ROOT:-/mnt/afs/00036/yzy/gpu_queue}"
+export QUEUE_ROOT="${QUEUE_ROOT:-/mnt/afs/00036/project_fuseomni/gpu_queue}"
 export QUEUE_BASE="${QUEUE_ROOT}/${JOB_ID}"
 export PENDING_DIR="${QUEUE_BASE}/pending"
 export RUNNING_DIR="${QUEUE_BASE}/running"
@@ -311,7 +311,7 @@ gpu_tail() {
 gpu_shutdown() {
     echo "{\"status\": \"shutdown\", \"current_task\": null, \"job_id\": \"$JOB_ID\"}" > "$CONTROL_FILE"
     echo "Shutdown signal sent to: $JOB_ID"
-    echo "Remember to delete the SCO ACP job: sco acp jobs delete --workspace-name=share-space ydj-${JOB_ID}"
+    echo "Remember to delete the SCO ACP job: sco acp jobs delete --workspace-name=share-space ${JOB_ID}"
 }
 
 # ==================== Help ====================

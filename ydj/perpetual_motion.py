@@ -30,14 +30,14 @@ import json
 import argparse
 
 # Auto-shutdown settings
-AUTO_SHUTDOWN_HOURS = 24  # Shutdown after this many hours from start
+AUTO_SHUTDOWN_HOURS = 72  # Shutdown after this many hours from start
 
 # ==================== Configuration ====================
 # JOB_ID for queue isolation (each perpetual motion instance has its own queue)
 JOB_ID = os.environ.get("JOB_ID", "default")
 
 # Queue directories (on shared storage) - isolated by JOB_ID
-QUEUE_ROOT = os.environ.get("QUEUE_ROOT", "/mnt/afs/00036/yzy/gpu_queue")
+QUEUE_ROOT = os.environ.get("QUEUE_ROOT", "/mnt/afs/00036/project_fuseomni/gpu_queue")
 QUEUE_BASE = os.path.join(QUEUE_ROOT, JOB_ID)
 PENDING_DIR = os.path.join(QUEUE_BASE, "pending")
 RUNNING_DIR = os.path.join(QUEUE_BASE, "running")
