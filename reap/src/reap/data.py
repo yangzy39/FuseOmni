@@ -52,6 +52,7 @@ class BaseDatasetProcessor(ABC):
         return_vllm_tokens_prompt: bool = False,
         truncate: bool = False,
         select_only_categories: list[str] | str | None = None,
+        processor: Any | None = None,
     ):
         """Defines base functionality for all Dataset Processors.
 
@@ -64,6 +65,8 @@ class BaseDatasetProcessor(ABC):
                 TokensPrompt objects instead of BatchEncoding. Defaults to False
             truncate (bool, optional): If True, will truncate the samples from
                 the dataset to the max_input_len instead of skipping them.
+            processor (Any | None, optional): Multimodal processor for the model.
+                Defaults to None.
 
         """
         if isinstance(dataset, DatasetDict):
@@ -85,6 +88,7 @@ class BaseDatasetProcessor(ABC):
         self.dataset = dataset
         self._mapped_dataset = None
         self.tokenizer = tokenizer
+        self.processor = processor
         self.split_by_category = split_by_category
         self.return_vllm_tokens_prompt = return_vllm_tokens_prompt
         self.truncate = truncate
@@ -107,9 +111,16 @@ class BaseDatasetProcessor(ABC):
             for category in self.select_only_categories:
                 if category not in self.categories:
                     raise RuntimeError(
-                        f"Category '{category}' not found in dataset. "
+                        f"Category '{category}' found in dataset. "
                         "Please ensure the dataset has the specified categories.",
                     )
+        
+        if self.processor is not None and self.pack_samples:
+            logger.warning(
+                "Processor is provided, which usually implies multimodal data. "
+                "Disabling pack_samples as packing multimodal BatchEncoding is not supported."
+            )
+            self.pack_samples = False
 
     @staticmethod
     @abstractmethod
@@ -207,8 +218,20 @@ class BaseDatasetProcessor(ABC):
             sampled.append(sample_idx)
             sample = category_dataset[sample_idx]
             encoded_sample = self._encode_sample(sample)
-            if encoded_sample.shape[-1] > self.max_input_len:
+            
+            # Handle BatchEncoding by looking at input_ids shape
+            if hasattr(encoded_sample, "input_ids"):
+                sample_len = encoded_sample.input_ids.shape[-1]
+            else:
+                sample_len = encoded_sample.shape[-1]
+
+            if sample_len > self.max_input_len:
                 if self.truncate:
+                    if hasattr(encoded_sample, "input_ids"):
+                        # This is a bit complex for BatchEncoding as we'd need to truncate all fields
+                        # For now, we'll just skip or do a simple truncate if it's just a tensor
+                        logger.warning("Truncation for BatchEncoding is not fully supported. Skipping sample.")
+                        continue
                     encoded_sample = encoded_sample[:, : self.max_input_len]
                 else:
                     continue
@@ -268,11 +291,18 @@ class BaseDatasetProcessor(ABC):
 
 class ChatDatasetProcessor(BaseDatasetProcessor):
     def _encode_sample(self, sample: str) -> torch.Tensor:
-        chat_sample = self.tokenizer.apply_chat_template(
-            sample[self.messages_field],
-            add_generation_prompt=False,
-            tokenize=False,
-        )
+        if self.processor is not None:
+            chat_sample = self.processor.apply_chat_template(
+                sample[self.messages_field],
+                add_generation_prompt=False,
+                tokenize=False,
+            )
+        else:
+            chat_sample = self.tokenizer.apply_chat_template(
+                sample[self.messages_field],
+                add_generation_prompt=False,
+                tokenize=False,
+            )
         return self.tokenizer(
             chat_sample,
             truncation=self.truncate,
@@ -285,11 +315,18 @@ class ChatDatasetProcessor(BaseDatasetProcessor):
 
         def chat_template_fn(sample: dict[str, any]) -> dict[str, any]:
             """Apply chat template to the sample."""
-            chat_sample = self.tokenizer.apply_chat_template(
-                sample[self.messages_field],
-                add_generation_prompt=False,
-                tokenize=False,
-            )
+            if self.processor is not None:
+                chat_sample = self.processor.apply_chat_template(
+                    sample[self.messages_field],
+                    add_generation_prompt=False,
+                    tokenize=False,
+                )
+            else:
+                chat_sample = self.tokenizer.apply_chat_template(
+                    sample[self.messages_field],
+                    add_generation_prompt=False,
+                    tokenize=False,
+                )
             return {"text": chat_sample}
 
         if self._mapped_dataset is None:
@@ -434,12 +471,67 @@ class FuseOmniChatDataset(ChatDatasetProcessor):
             new_content = []
             for c in msg["content"]:
                 if c.get("audio_path") is not None:
-                    new_content.append({"type": "audio", "audio_path": c["audio_path"]})
+                    # Qwen-Omni expects 'audio' key for audio content in messages
+                    new_content.append({"type": "audio", "audio": c["audio_path"]})
+                elif c.get("image_path") is not None:
+                    new_content.append({"type": "image", "image": c["image_path"]})
+                elif c.get("video_path") is not None:
+                    new_content.append({"type": "video", "video": c["video_path"]})
                 elif c.get("text") is not None:
                     new_content.append({"type": "text", "text": str(c["text"])})
+                elif c.get("type") in ["text", "audio", "image", "video"]:
+                    # Already in a recognized format, just append
+                    new_content.append(c)
             transformed.append({"role": msg["role"], "content": new_content})
         
         return {"messages": transformed}
+
+    def _encode_sample(self, sample: dict[str, any]) -> torch.Tensor | BatchEncoding:
+        if self.processor is None:
+            return super()._encode_sample(sample)
+        
+        # Defensive check: if _map_fn wasn't applied or returned unformatted data
+        messages = sample.get(self.messages_field)
+        if messages is None:
+            # Fallback if messages_field is missing
+            messages = sample.get("messages", [])
+        
+        # Check if we need to apply mapping manually (e.g. if map() was cached or skipped)
+        needs_mapping = False
+        if isinstance(messages, list) and len(messages) > 0:
+            for msg in messages:
+                if isinstance(msg, dict) and "content" in msg:
+                    content = msg["content"]
+                    if isinstance(content, list):
+                        for item in content:
+                            if isinstance(item, dict) and any(k in item for k in ["audio_path", "image_path", "video_path"]):
+                                needs_mapping = True
+                                break
+                if needs_mapping: break
+        
+        if needs_mapping:
+            sample = self._map_fn(sample)
+            messages = sample["messages"]
+        
+        from qwen_omni_utils import process_mm_info
+
+        # Qwen3-Omni uses the processor for both chat template and multimodal processing
+        text = self.processor.apply_chat_template(
+            messages, add_generation_prompt=False, tokenize=False
+        )
+        audios, images, videos = process_mm_info(messages, use_audio_in_video=True)
+        
+        inputs = self.processor(
+            text=text,
+            audio=audios,
+            images=images,
+            videos=videos,
+            return_tensors="pt",
+            padding=True,
+            use_audio_in_video=True
+        )
+        # We need to return the full inputs for record_activations
+        return inputs
 
 
 

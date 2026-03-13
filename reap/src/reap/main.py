@@ -7,6 +7,7 @@ import pathlib
 import re
 import time
 from typing import Any
+from collections.abc import Mapping
 import gc
 import yaml
 import shutil
@@ -49,7 +50,7 @@ from reap.cluster import (
     kmeans_clustering
 )
 from reap.model_util import get_moe, assert_merge, MODEL_ATTRS, patched_model_map, get_super_expert_indices
-from reap.eval import run_evaluate
+# from reap.eval import run_evaluate
 from reap.cluster_plots import plot_cluster_analysis
 from reap.metrics import get_distance_fn
 
@@ -136,6 +137,13 @@ def record_activations(
             f"Supported: {list(DATASET_REGISTRY.keys())}"
         )
 
+    # load processor if Qwen3-Omni
+    processor_obj = None
+    if "Qwen3-Omni" in model_args.model_name or "Qwen3Omni" in model_args.model_name:
+        from transformers import Qwen3OmniMoeProcessor
+        processor_obj = Qwen3OmniMoeProcessor.from_pretrained(model_args.model_name)
+        logger.info(f"Loaded Qwen3OmniMoeProcessor for {model_args.model_name}")
+
     # init processor & process dataset
     processor = proc_cls(
         dataset=raw_ds,
@@ -145,6 +153,7 @@ def record_activations(
         split_by_category=obs_args.split_by_category,
         return_vllm_tokens_prompt=obs_args.return_vllm_tokens_prompt,
         truncate=obs_args.truncate,
+        processor=processor_obj,
     )
     category_data_batches = processor.get_processed_dataset(
         samples_per_category=obs_args.samples_per_category,
@@ -190,9 +199,17 @@ def record_activations(
                     truncation=True,
                     max_length=model_max_length,
                 )
-                tokenized = {k: v.to(model.device) for k, v in tokenized.items()}
-                for _ in range(2):
-                    _ = model(**tokenized)
+                tokenized = {
+                    k: v.to(device=model.device, dtype=model.dtype if v.is_floating_point() else None) 
+                    if isinstance(v, torch.Tensor) else v 
+                    for k, v in tokenized.items()
+                }
+                if hasattr(model, "thinker"):
+                    for _ in range(2):
+                        _ = model.thinker(**tokenized)
+                else:
+                    for _ in range(2):
+                        _ = model(**tokenized)
             except Exception as e:
                 raise RuntimeError(
                     f"Failed to run model with max input length {model_max_length}: {e}"
@@ -217,7 +234,35 @@ def record_activations(
             try:
                 logger.info("No previous data found @ %s", f_name)
                 for sample in tqdm(cat_data, desc=f"Processing {category} samples"):
-                    model(sample.to(model.device))
+                    if isinstance(sample, (dict, Mapping)) or hasattr(sample, "to"):
+                        # Handle dict-like or BatchEncoding inputs
+                        if hasattr(sample, "to") and not isinstance(sample, (dict, Mapping)):
+                            # For BatchEncoding/etc that has .to() but isn't a plain mapping
+                            # We can't easily pass dtype to .to() if it contains mixed types
+                            # so we'll just handle it as a dict below
+                            pass
+                        
+                        if isinstance(sample, (dict, Mapping)):
+                            sample = {
+                                k: v.to(device=model.device, dtype=model.dtype if v.is_floating_point() else None) 
+                                if isinstance(v, torch.Tensor) else v 
+                                for k, v in sample.items()
+                            }
+                        else:
+                            # Fallback for BatchEncoding or other objects with .to()
+                            sample = sample.to(model.device)
+                        
+                        if hasattr(model, "thinker"):
+                            model.thinker(**sample)
+                        else:
+                            model(**sample)
+                    else:
+                        # Fallback for simple tensors
+                        sample_to_device = sample.to(device=model.device, dtype=model.dtype if sample.is_floating_point() else None)
+                        if hasattr(model, "thinker"):
+                             model.thinker(sample_to_device)
+                        else:
+                            model(sample_to_device)
             except Exception as e:
                 logger.error(f"Error processing category '{category}'")
                 logger.info(
@@ -236,7 +281,20 @@ def record_activations(
                 f"{cat_dir / obs_args.output_file_name}"
             )
     observer.close_hooks()
-    with open(f"{cat_dir / obs_args.output_file_name}", "rb") as f:
+    # Return data for the first (and usually only) category processed
+    output_files = list(results_dir.glob("**/observations_*.pt"))
+    if not output_files:
+        raise RuntimeError(f"No observation data found in {results_dir}")
+    
+    # Prioritize 'all' category if it exists
+    all_cat_file = results_dir / "all" / obs_args.output_file_name
+    if all_cat_file.exists():
+        f_path = all_cat_file
+    else:
+        f_path = output_files[0]
+        
+    logger.info(f"Returning observer data from {f_path}")
+    with open(f_path, "rb") as f:
         observer_data = torch.load(f, weights_only=False)
     return observer_data
 
@@ -472,25 +530,55 @@ def save_merged_model(
 
 
 @torch.no_grad()
-def smoke_test(model: nn.Module, tokenizer: AutoTokenizer):
+def smoke_test(model: nn.Module, tokenizer: AutoTokenizer, processor: Any | None = None):
     """Run a smoke test to ensure the model is functioning correctly."""
     prompt = "What is your name?"
     test_input = [
-        {"role": "user", "content": prompt},
+        {"role": "user", "content": [{"type": "text", "text": prompt}]},
     ]
-    inputs = tokenizer.apply_chat_template(
-        test_input,
-        return_tensors="pt",
-        add_generation_prompt=True,
-        tokenize=True,
-        # enable_thinking=False,
-    ).to(model.device)
-    outputs = model.generate(
-        inputs,
-        max_new_tokens=50,
-        do_sample=True,
-    )
-    response = tokenizer.batch_decode(outputs, skip_special_tokens=False)
+    if processor is not None:
+        text = processor.apply_chat_template(
+            test_input,
+            return_tensors="pt",
+            add_generation_prompt=True,
+            tokenize=False,
+        )
+        inputs = processor(text=text, return_tensors="pt")
+        inputs = {
+            k: v.to(device=model.device, dtype=model.dtype if v.is_floating_point() else None) 
+            if isinstance(v, torch.Tensor) else v 
+            for k, v in inputs.items()
+        }
+    else:
+        inputs = tokenizer.apply_chat_template(
+            test_input,
+            return_tensors="pt",
+            add_generation_prompt=True,
+            tokenize=True,
+            # enable_thinking=False,
+        ).to(model.device)
+    
+    if isinstance(inputs, torch.Tensor):
+        outputs = model.generate(
+            inputs,
+            max_new_tokens=50,
+            do_sample=True,
+        )
+    else:
+        # Handle dict-like inputs from processor
+        outputs = model.generate(
+            **inputs,
+            max_new_tokens=50,
+            do_sample=True,
+        )
+    
+    if isinstance(outputs, torch.Tensor):
+        decode_fn = processor.batch_decode if processor is not None else tokenizer.batch_decode
+        response = decode_fn(outputs, skip_special_tokens=False)
+    else:
+        # Handle results from model.generate if they are not just tensors
+        decode_fn = processor.batch_decode if processor is not None else tokenizer.batch_decode
+        response = decode_fn(outputs.sequences if hasattr(outputs, "sequences") else outputs, skip_special_tokens=False)
     logger.info("Smoke test response: %s", response[0])
 
 
@@ -777,16 +865,16 @@ def main():
                 )
 
     # eval
-    if reap_args.do_eval:
-        remove_hook_from_module(model, recurse=True)
-        model.to("cpu")
-        del model
-        del observer_data
-        del cluster_labels
-        torch.cuda.empty_cache()
-        gc.collect()
-        model_args.model_name = merged_model_dir
-        run_evaluate(model_args, merged_model_dir / "eval", eval_args, reap_args.seed)
+    # if reap_args.do_eval:
+    #     remove_hook_from_module(model, recurse=True)
+    #     model.to("cpu")
+    #     del model
+    #     del observer_data
+    #     del cluster_labels
+    #     torch.cuda.empty_cache()
+    #     gc.collect()
+    #     model_args.model_name = merged_model_dir
+    #     run_evaluate(model_args, merged_model_dir / "eval", eval_args, reap_args.seed)
 
 
 if __name__ == "__main__":

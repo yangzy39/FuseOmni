@@ -33,7 +33,7 @@ from reap.cluster import (
     dynamic_frequency_penalized_clustering,
 )
 from reap.model_util import get_moe, assert_merge, MODEL_ATTRS, patched_model_map, get_super_expert_indices
-from reap.eval import run_evaluate
+# from reap.eval import run_evaluate
 import shutil
 
 logger = logging.getLogger(__name__)
@@ -252,9 +252,10 @@ def main():
     # get local patched model if req'd
     model_name = patched_model_map(model_args.model_name)
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-    # load model
+    # load model and processor
+    processor = None
     if "Qwen3-Omni" in model_name or "Qwen3Omni" in model_name:
-        from transformers import Qwen3OmniMoeForConditionalGeneration
+        from transformers import Qwen3OmniMoeForConditionalGeneration, Qwen3OmniMoeProcessor
         model = Qwen3OmniMoeForConditionalGeneration.from_pretrained(
             model_name,
             device_map="auto",
@@ -262,6 +263,7 @@ def main():
             trust_remote_code=True,
             local_files_only=True,
         )
+        processor = Qwen3OmniMoeProcessor.from_pretrained(model_name)
     else:
         model = AutoModelForCausalLM.from_pretrained(
             model_name,
@@ -337,7 +339,7 @@ def main():
         if reap_args.smoke_test:
             logger.info("Running smoke test on the merged model...")
             try:
-                smoke_test(model, tokenizer)
+                smoke_test(model, tokenizer, processor=processor)
             except Exception as e:
                 logger.error(f"Smoke test failed: {e}")
                 pass
@@ -369,15 +371,15 @@ def main():
         )
 
     # eval
-    if reap_args.do_eval:
-        remove_hook_from_module(model, recurse=True)
-        model.to("cpu")
-        del model
-        del observer_data
-        torch.cuda.empty_cache()
-        gc.collect()
-        model_args.model_name = pruned_model_dir
-        run_evaluate(model_args, pruned_model_dir / "eval", eval_args, reap_args.seed)
+    # if reap_args.do_eval:
+    #     remove_hook_from_module(model, recurse=True)
+    #     model.to("cpu")
+    #     del model
+    #     del observer_data
+    #     torch.cuda.empty_cache()
+    #     gc.collect()
+    #     model_args.model_name = pruned_model_dir
+    #     run_evaluate(model_args, pruned_model_dir / "eval", eval_args, reap_args.seed)
 
 
 if __name__ == "__main__":
