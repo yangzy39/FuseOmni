@@ -1,4 +1,7 @@
 from typing import List, Callable, Dict, Optional
+import argparse
+import pathlib
+import pickle
 
 import numpy as np
 import torch
@@ -6,6 +9,9 @@ from scipy.spatial.distance import squareform
 from scipy.cluster.hierarchy import linkage
 from scipy.cluster.vq import kmeans2
 import logging
+
+from reap.args import ClusterArgs
+from reap.cluster_plots import plot_cluster_analysis
 
 
 def get_penalty_vector(
@@ -839,3 +845,71 @@ def multi_layer_kmeans_clustering_on_ca(
             all_cluster_labels[original_layer_idx] = remapped_labels
 
     return all_cluster_labels
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Run expert clustering and generate plots.")
+    parser.add_argument("--observations_path", type=str, required=True, help="Path to the .pt observations file.")
+    parser.add_argument("--output_dir", type=str, required=True, help="Directory to save the plots.")
+    parser.add_argument("--num_clusters", type=int, default=None, help="Number of clusters per layer.")
+    parser.add_argument("--compression_ratio", type=float, default=0.25, help="Compression ratio if num_clusters is None.")
+    parser.add_argument("--expert_sim", type=str, default="router_logits", help="Expert similarity metric.")
+    parser.add_argument("--cluster_method", type=str, default="agglomerative", help="Clustering method.")
+    parser.add_argument("--distance_measure", type=str, default="cosine", help="Distance measure.")
+    
+    args = parser.parse_args()
+    
+    obs_path = pathlib.Path(args.observations_path)
+    output_dir = pathlib.Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    print(f"Loading observations from {obs_path}...")
+    observer_data = torch.load(obs_path, map_location="cpu", weights_only=False)
+    
+    # Minimal ClusterArgs for plotting
+    cluster_args = ClusterArgs(
+        expert_sim=args.expert_sim,
+        cluster_method=args.cluster_method,
+        compression_ratio=args.compression_ratio,
+        num_clusters=args.num_clusters,
+        frequency_penalty=False,
+    )
+    
+    num_layers = len(observer_data)
+    first_layer = next(iter(observer_data))
+    num_experts = observer_data[first_layer]["expert_frequency"].shape[0]
+    
+    if args.num_clusters is None:
+        target_clusters = int(num_experts * (1 - args.compression_ratio))
+    else:
+        target_clusters = args.num_clusters
+        
+    print(f"Clustering into {target_clusters} clusters per layer...")
+    
+    cluster_labels = {}
+    for layer, data in observer_data.items():
+        if args.expert_sim == "router_logits":
+            dist = data["router_logit_similiarity"]
+        elif args.expert_sim == "characteristic_activation":
+            dist = data["characteristic_activation"]
+        else:
+            dist = data.get(args.expert_sim)
+            if dist is None:
+                print(f"Warning: {args.expert_sim} not found in data for layer {layer}. Skipping.")
+                continue
+
+        if args.cluster_method == "agglomerative":
+            labels = hierarchical_clustering(dist, "average", target_clusters)
+            cluster_labels[layer] = torch.tensor(labels)
+        elif args.cluster_method == "kmeans":
+            labels = kmeans_clustering(dist.numpy(), target_clusters)
+            cluster_labels[layer] = torch.tensor(labels)
+            
+    print(f"Generating plots in {output_dir}...")
+    plot_cluster_analysis(
+        cluster_labels,
+        output_dir,
+        skip_first=False,
+        skip_last=False
+    )
+    print("Done.")
