@@ -285,7 +285,7 @@ class MoETransformerObserver(BaseTransformerObserver):
                 dtype=torch.float32,
             )
             # per total token normalized states -> MC-SMoE
-            layer_state["router_logit_similiarity"] = OnlineStatsTracker(
+            layer_state["router_logit_similarity"] = OnlineStatsTracker(
                 shape=(num_experts, num_experts),
                 count_shape=1,
                 device=device,
@@ -466,7 +466,7 @@ class MoETransformerObserver(BaseTransformerObserver):
                 )  # yields (num_experts, num_experts)
 
                 # router_logit_similarity with total tokens count
-                self.state[layer_number]["router_logit_similiarity"].update(
+                self.state[layer_number]["router_logit_similarity"].update(
                     router_logit_sim, num_tokens
                 )
                 del router_logit_sim

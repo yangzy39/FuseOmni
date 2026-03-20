@@ -144,6 +144,8 @@ venv.bak/
 # Rope project settings
 .ropeproject
 
+# ECC skills
+.agent
 # mkdocs documentation
 /site
 

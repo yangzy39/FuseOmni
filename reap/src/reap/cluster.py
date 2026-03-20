@@ -889,7 +889,15 @@ if __name__ == "__main__":
     cluster_labels = {}
     for layer, data in observer_data.items():
         if args.expert_sim == "router_logits":
-            dist = data["router_logit_similiarity"]
+            if "router_logit_similarity" in data:
+                dist = data["router_logit_similarity"]
+            elif "router_logit_similiarity" in data:
+                dist = data["router_logit_similiarity"]
+            else:
+                print(f"Error: 'router_logit_similarity' not found in data for layer {layer}.")
+                print("This likely means the observations were collected with --record_pruning_metrics_only true.")
+                print("Clustering requires similarity metrics. Please re-collect observations without this flag.")
+                continue
         elif args.expert_sim == "characteristic_activation":
             dist = data["characteristic_activation"]
         else:

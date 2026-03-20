@@ -334,7 +334,12 @@ def cluster(
             routed_ca = data[layer]["routed_characteristic_activation"]
         except KeyError:
             pass
-        router_logits = data[layer]["router_logit_similiarity"]
+        if "router_logit_similarity" in data[layer]:
+            router_logits = data[layer]["router_logit_similarity"]
+        elif "router_logit_similiarity" in data[layer]:
+            router_logits = data[layer]["router_logit_similiarity"]
+        else:
+            router_logits = None
 
         expert_similarity_scores = {
             "ttm": ttm_sim_matrix,
@@ -344,6 +349,12 @@ def cluster(
             "router_logits": router_logits,
             "online_characteristic_activation_dist": online_characteristic_activation_dist,
         }
+        if expert_similarity_scores[cluster_args.expert_sim] is None:
+            raise KeyError(
+                f"Requested expert similarity metric '{cluster_args.expert_sim}' was not found in the observer data at layer {layer}. "
+                "This typically happens when observations are collected with `record_pruning_metrics_only=True`. "
+                "Please re-run the observer without this flag to collect clustering metrics."
+            )
         distance = expert_similarity_scores[cluster_args.expert_sim]
 
         if cluster_args.expert_sim in [

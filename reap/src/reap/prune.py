@@ -188,13 +188,19 @@ def prune(
     # patch config and dump
     logger.info("Saving pruned model...")
     retained_experts = len(retained_expert_indicies)
+
     setattr(model.config, model_attrs["num_experts"], retained_experts)
+        
     if model.__class__.__name__ == "Ernie4_5_MoeForCausalLM":  # remote-code verson
         model.config.moe_capacity = [
             retained_experts,
             retained_experts,
             retained_experts,
         ]
+
+    # Fix Qwen3-Omni config saving
+    if model.__class__.__name__ == "Qwen3OmniMoeForConditionalGeneration":
+        model.config.thinker_config.text_config.num_experts = retained_experts
 
     pruned_model_dir.mkdir(parents=True, exist_ok=True)
     start = time.time()
